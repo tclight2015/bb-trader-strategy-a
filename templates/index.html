@@ -1,0 +1,1515 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>BB Grid Trader — 策略A</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f5f7fa;
+  --bg2: #ffffff;
+  --bg3: #eef1f6;
+  --border: #dde2ec;
+  --border2: #c8d0e0;
+  --text: #1a2035;
+  --text2: #4a5578;
+  --text3: #8892a8;
+  --blue: #2563eb;
+  --blue-light: #eff6ff;
+  --blue-mid: #bfdbfe;
+  --green: #16a34a;
+  --green-light: #f0fdf4;
+  --green-mid: #bbf7d0;
+  --red: #dc2626;
+  --red-light: #fef2f2;
+  --red-mid: #fecaca;
+  --orange: #ea580c;
+  --orange-light: #fff7ed;
+  --yellow: #ca8a04;
+  --yellow-light: #fefce8;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
+  --radius: 10px;
+  --radius-sm: 6px;
+  --font: 'DM Sans', sans-serif;
+  --mono: 'DM Mono', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  min-height: 100vh;
+}
+
+/* NAV */
+nav {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: var(--shadow);
+}
+
+.nav-brand {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--blue);
+  letter-spacing: -0.02em;
+  padding: 14px 20px 14px 0;
+  border-right: 1px solid var(--border);
+  margin-right: 8px;
+  white-space: nowrap;
+}
+
+.nav-tabs {
+  display: flex;
+  gap: 2px;
+  flex: 1;
+}
+
+.nav-tab {
+  padding: 14px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.nav-tab:hover { color: var(--blue); }
+.nav-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+.nav-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--mono);
+}
+
+.status-pill.running { background: var(--green-light); color: var(--green); }
+.status-pill.paused { background: var(--yellow-light); color: var(--yellow); }
+.status-pill.stopped { background: var(--red-light); color: var(--red); }
+
+.dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+}
+.dot.green { background: var(--green); animation: pulse-g 2s infinite; }
+.dot.yellow { background: var(--yellow); }
+.dot.red { background: var(--red); }
+
+@keyframes pulse-g {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(22,163,74,0.4); }
+  50% { opacity: 0.8; box-shadow: 0 0 0 4px rgba(22,163,74,0); }
+}
+
+/* PAGES */
+.page { display: none; padding: 20px; max-width: 1100px; margin: 0 auto; }
+.page.active { display: block; }
+
+/* CARDS */
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.card-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.card-body { padding: 18px; }
+
+/* BIG STATS ROW */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.stat-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+}
+
+.stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+
+.stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--text);
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.stat-value.green { color: var(--green); }
+.stat-value.red { color: var(--red); }
+.stat-value.blue { color: var(--blue); }
+.stat-value.orange { color: var(--orange); }
+
+.stat-sub {
+  font-size: 11px;
+  color: var(--text3);
+  margin-top: 4px;
+  font-family: var(--mono);
+}
+
+/* MARGIN BAR */
+.margin-bar-wrap { margin-top: 10px; }
+.margin-bar-track {
+  height: 8px;
+  background: var(--bg3);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.margin-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+.margin-bar-fill.low { background: var(--green); }
+.margin-bar-fill.mid { background: var(--yellow); }
+.margin-bar-fill.high { background: var(--red); }
+.margin-bar-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text3);
+  font-family: var(--mono);
+}
+
+/* CONTROL BUTTONS */
+.btn-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.btn-primary { background: var(--blue); color: white; border-color: var(--blue); }
+.btn-primary:hover { background: #1d4ed8; }
+.btn-success { background: var(--green); color: white; border-color: var(--green); }
+.btn-success:hover { background: #15803d; }
+.btn-danger { background: var(--red); color: white; border-color: var(--red); }
+.btn-danger:hover { background: #b91c1c; }
+.btn-warning { background: var(--orange); color: white; border-color: var(--orange); }
+.btn-warning:hover { background: #c2410c; }
+.btn-ghost { background: transparent; color: var(--text2); }
+.btn-ghost:hover { background: var(--bg3); }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.btn-xs { padding: 3px 8px; font-size: 11px; }
+
+/* POSITIONS TABLE */
+.positions-wrap { display: flex; flex-direction: column; gap: 12px; }
+
+.position-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.position-header {
+  padding: 12px 16px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.position-sym {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.badge {
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--mono);
+}
+
+.badge-short { background: var(--red-light); color: var(--red); }
+.badge-long { background: var(--green-light); color: var(--green); }
+.badge-pause { background: var(--yellow-light); color: var(--yellow); }
+
+.position-body { padding: 14px 16px; }
+
+.pos-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.pos-stat { }
+.pos-stat-label { font-size: 10px; color: var(--text3); font-weight: 600; text-transform: uppercase; margin-bottom: 2px; }
+.pos-stat-value { font-size: 14px; font-weight: 700; font-family: var(--mono); color: var(--text); }
+.pos-stat-value.profit { color: var(--green); }
+.pos-stat-value.loss { color: var(--red); }
+
+.orders-list { margin-top: 10px; }
+.orders-list-title { font-size: 11px; color: var(--text3); font-weight: 600; margin-bottom: 6px; }
+.order-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 8px;
+  background: var(--bg3);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: var(--mono);
+  margin-bottom: 3px;
+}
+
+/* CONFIG GRID */
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.config-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.config-input {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+
+.config-input:focus { border-color: var(--blue); background: white; }
+
+.config-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 8px 0 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+  grid-column: 1 / -1;
+}
+
+/* SCANNER TABLE */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+thead tr { border-bottom: 2px solid var(--border); }
+th {
+  text-align: left; padding: 9px 12px;
+  color: var(--text3); font-weight: 600;
+  font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; cursor: pointer;
+  user-select: none; white-space: nowrap;
+}
+th:hover { color: var(--blue); }
+th.sorted { color: var(--blue); }
+tbody tr { border-bottom: 1px solid var(--bg3); transition: background 0.1s; }
+tbody tr:hover { background: var(--bg3); }
+td { padding: 9px 12px; white-space: nowrap; }
+
+.sym-name { font-weight: 700; font-size: 13px; color: var(--text); }
+.dist-close { color: var(--blue); font-weight: 700; }
+.dist-mid { color: var(--orange); }
+.dist-far { color: var(--text3); }
+.bw-wide { color: var(--green); font-weight: 600; }
+
+.dist-bar-wrap { display: flex; align-items: center; gap: 8px; }
+.dist-bar { width: 50px; height: 4px; background: var(--bg3); border-radius: 2px; overflow: hidden; }
+.dist-bar-fill { height: 100%; border-radius: 2px; }
+
+/* REPORTS */
+.report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media(max-width: 700px) { .report-grid { grid-template-columns: 1fr; } }
+
+.pnl-chart { width: 100%; height: 200px; position: relative; }
+
+.history-table td { font-size: 12px; }
+.pnl-pos { color: var(--green); font-weight: 600; }
+.pnl-neg { color: var(--red); font-weight: 600; }
+
+/* CANDIDATE POOL */
+.candidate-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.candidate-chip {
+  padding: 4px 10px;
+  background: var(--blue-light);
+  border: 1px solid var(--blue-mid);
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--blue);
+}
+
+/* LAYOUT */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media(max-width: 750px) { .two-col { grid-template-columns: 1fr; } }
+
+.section { margin-bottom: 16px; }
+
+/* MODAL */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.3);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000; display: none;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: white;
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 360px; width: 90%;
+  box-shadow: var(--shadow-md);
+}
+.modal-title { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+.modal-body { font-size: 14px; color: var(--text2); margin-bottom: 20px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* FILTER BAR */
+.filter-bar {
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+}
+
+.filter-label { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; }
+
+.filter-input {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none; width: 80px;
+}
+.filter-input:focus { border-color: var(--blue); }
+.filter-search { width: 120px; }
+
+select.filter-select {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px; padding: 5px 8px;
+  outline: none; cursor: pointer;
+}
+
+/* CAPITAL LOG */
+.capital-form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.capital-form select, .capital-form input {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px; font-size: 13px;
+  background: var(--bg3); color: var(--text);
+  outline: none;
+}
+.capital-form input:focus { border-color: var(--blue); background: white; }
+
+/* SCROLLBAR */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg3); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+@media(max-width: 600px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .stat-value { font-size: 20px; }
+  nav { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-brand">📈 BB Grid A</div>
+  <div class="nav-tabs">
+    <div class="nav-tab active" onclick="showPage('dashboard')">儀表板</div>
+    <div class="nav-tab" onclick="showPage('scanner')">掃描器</div>
+    <div class="nav-tab" onclick="showPage('reports')">報表</div>
+    <div class="nav-tab" onclick="showPage('settings')">設定</div>
+    <div class="nav-tab" onclick="showPage('logs')">日誌</div>
+  </div>
+  <div class="nav-status">
+    <div class="status-pill running" id="systemStatus">
+      <div class="dot green" id="statusDot"></div>
+      <span id="statusText">運行中</span>
+    </div>
+  </div>
+</nav>
+
+<!-- ========== PAGE: DASHBOARD ========== -->
+<div class="page active" id="page-dashboard">
+
+  <!-- Account Stats -->
+  <div class="stats-grid section">
+    <div class="stat-card">
+      <div class="stat-label">帳戶總餘額</div>
+      <div class="stat-value blue" id="totalBalance">—</div>
+      <div class="stat-sub">USDT</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">可用保證金</div>
+      <div class="stat-value green" id="availBalance">—</div>
+      <div class="stat-sub">USDT</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">浮動損益</div>
+      <div class="stat-value" id="unrealizedPnl">—</div>
+      <div class="stat-sub">USDT</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">持倉幣種</div>
+      <div class="stat-value" id="symbolCount">—</div>
+      <div class="stat-sub">/ <span id="maxSymbols">3</span> 個</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">每單合約價值</div>
+      <div class="stat-value blue" id="notionalPerOrder">—</div>
+      <div class="stat-sub">USDT</div>
+    </div>
+  </div>
+
+  <!-- Margin Bar -->
+  <div class="card section">
+    <div class="card-header">
+      <div class="card-title">保證金使用率</div>
+      <span id="marginRatioBadge" class="badge">—%</span>
+    </div>
+    <div class="card-body">
+      <div class="margin-bar-wrap">
+        <div class="margin-bar-track">
+          <div class="margin-bar-fill low" id="marginBarFill" style="width:0%"></div>
+        </div>
+        <div class="margin-bar-labels">
+          <span>0%</span>
+          <span id="marginLimitLabel">限制: 75%</span>
+          <span>100%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="two-col section">
+    <div class="card">
+      <div class="card-header"><div class="card-title">系統控制</div></div>
+      <div class="card-body">
+        <div class="btn-row">
+          <button class="btn btn-success" onclick="systemControl('start')">▶ 啟動</button>
+          <button class="btn btn-warning" onclick="systemControl('pause')">⏸ 暫停開倉</button>
+          <button class="btn btn-ghost" onclick="systemControl('resume')">↺ 恢復</button>
+          <button class="btn btn-danger" onclick="confirmStop()">⏹ 停止系統</button>
+        </div>
+        <div style="margin-top:10px; font-size:12px; color:var(--text3)" id="pauseInfo"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title">候選監控池</div></div>
+      <div class="card-body">
+        <div class="candidate-list" id="candidatePool">
+          <span style="color:var(--text3);font-size:12px">掃描中...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Positions -->
+  <div class="card section">
+    <div class="card-header">
+      <div class="card-title">持倉狀態</div>
+      <button class="btn btn-ghost btn-sm" onclick="loadDashboard()">↺ 更新</button>
+    </div>
+    <div class="card-body">
+      <div class="positions-wrap" id="positionsWrap">
+        <div style="text-align:center;padding:30px;color:var(--text3);font-size:13px">無持倉</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Capital Log -->
+  <div class="card section">
+    <div class="card-header"><div class="card-title">出入金紀錄</div></div>
+    <div class="card-body">
+      <div class="capital-form">
+        <select id="capitalType">
+          <option value="DEPOSIT">入金</option>
+          <option value="WITHDRAW">出金</option>
+        </select>
+        <input type="number" id="capitalAmount" placeholder="金額 USDT" step="0.01">
+        <input type="text" id="capitalNote" placeholder="備注（選填）">
+        <button class="btn btn-primary btn-sm" onclick="addCapitalLog()">記錄</button>
+      </div>
+      <div id="capitalLogList" style="font-size:12px;color:var(--text2)"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ========== PAGE: SCANNER ========== -->
+<div class="page" id="page-scanner">
+  <div class="filter-bar">
+    <span class="filter-label">距上軌上限%</span>
+    <input class="filter-input" id="maxDist" type="number" value="5" min="0.1" max="100" step="0.1" onchange="renderScanner()">
+    <span class="filter-label">成交量篩選</span>
+    <select class="filter-select" id="volFilter" onchange="renderScanner()">
+      <option value="0">無限制</option>
+      <option value="1000000">1M+</option>
+      <option value="5000000">5M+</option>
+      <option value="10000000">10M+</option>
+      <option value="50000000">50M+</option>
+    </select>
+    <span class="filter-label">搜尋</span>
+    <input class="filter-search filter-input" id="searchInput" type="text" placeholder="BTC, ETH..." oninput="renderScanner()">
+    <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+      <span style="font-size:11px;color:var(--text3);font-family:var(--mono)" id="scannerStatus">—</span>
+      <span class="badge" id="scannerCount">—</span>
+      <button class="btn btn-ghost btn-sm" onclick="manualScanRefresh()">↺ 重新掃描</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th onclick="sortScanner('symbol')">幣種 <span id="sh-symbol">↕</span></th>
+            <th onclick="sortScanner('price')">現價 <span id="sh-price">↕</span></th>
+            <th onclick="sortScanner('upper')">上軌 <span id="sh-upper">↕</span></th>
+            <th onclick="sortScanner('dist_to_upper_pct')">距上軌% <span id="sh-dist">↑</span></th>
+            <th onclick="sortScanner('band_width_pct')">帶寬% <span id="sh-bw">↕</span></th>
+            <th>24H量(USDT)</th>
+          </tr>
+        </thead>
+        <tbody id="scannerBody">
+          <tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text3)">掃描中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ========== PAGE: REPORTS ========== -->
+<div class="page" id="page-reports">
+
+  <!-- Summary stats -->
+  <div class="stats-grid section">
+    <div class="stat-card">
+      <div class="stat-label">總交易次數</div>
+      <div class="stat-value" id="totalTrades">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">勝率</div>
+      <div class="stat-value green" id="winRate">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">總損益</div>
+      <div class="stat-value" id="totalPnl">—</div>
+      <div class="stat-sub">USDT</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">今日損益</div>
+      <div class="stat-value" id="todayPnl">—</div>
+      <div class="stat-sub">USDT</div>
+    </div>
+  </div>
+
+  <!-- PnL Curve -->
+  <div class="card section">
+    <div class="card-header"><div class="card-title">累積損益曲線</div></div>
+    <div class="card-body">
+      <canvas id="pnlChart" height="200"></canvas>
+      <div id="pnlChartEmpty" style="text-align:center;padding:60px;color:var(--text3);font-size:13px;display:none">尚無交易紀錄</div>
+    </div>
+  </div>
+
+  <!-- Trade History -->
+  <div class="card section">
+    <div class="card-header"><div class="card-title">歷史交易紀錄</div></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>幣種</th>
+            <th>開倉時間</th>
+            <th>平倉時間</th>
+            <th>均入價</th>
+            <th>平倉價</th>
+            <th>筆數</th>
+            <th>損益(USDT)</th>
+            <th>本金%</th>
+            <th>原因</th>
+          </tr>
+        </thead>
+        <tbody id="historyBody">
+          <tr><td colspan="9" style="text-align:center;padding:30px;color:var(--text3)">無紀錄</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Daily Summary -->
+  <div class="card section">
+    <div class="card-header"><div class="card-title">每日績效</div></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>日期</th>
+            <th>交易次數</th>
+            <th>勝出</th>
+            <th>勝率</th>
+            <th>損益(USDT)</th>
+          </tr>
+        </thead>
+        <tbody id="dailyBody">
+          <tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text3)">無紀錄</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- ========== PAGE: SETTINGS ========== -->
+<div class="page" id="page-settings">
+  <div class="card section">
+    <div class="card-header">
+      <div class="card-title">參數設定</div>
+      <button class="btn btn-primary btn-sm" onclick="saveConfig()">💾 儲存設定</button>
+    </div>
+    <div class="card-body">
+      <div class="config-grid" id="configGrid">載入中...</div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <div class="modal-title" id="modalTitle">確認操作</div>
+    <div class="modal-body" id="modalBody">確定要執行此操作？</div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-danger" id="modalConfirmBtn">確認</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===== STATE =====
+let currentPage = 'dashboard';
+let scannerData = [];
+let scannerSortKey = 'dist_to_upper_pct';
+let scannerSortAsc = true;
+let configData = {};
+let refreshTimer;
+
+// ===== NAVIGATION =====
+function showPage(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  event.target.classList.add('active');
+  currentPage = page;
+  if (page === 'dashboard') loadDashboard();
+  if (page === 'scanner') loadScanner();
+  if (page === 'reports') loadReports();
+  if (page === 'settings') loadSettings();
+  if (page === 'logs') loadLogs();
+}
+
+// ===== FORMAT HELPERS =====
+function fmt(n, d=4) {
+  if (n == null) return '—';
+  n = parseFloat(n);
+  if (Math.abs(n) >= 1000) return n.toFixed(2);
+  if (Math.abs(n) >= 1) return n.toFixed(d > 4 ? 4 : d);
+  if (Math.abs(n) >= 0.001) return n.toFixed(6);
+  return n.toFixed(8);
+}
+function fmtUSDT(n) {
+  if (n == null) return '—';
+  return parseFloat(n).toFixed(2);
+}
+function fmtPct(n) {
+  if (n == null) return '—';
+  return parseFloat(n).toFixed(2) + '%';
+}
+function fmtVol(n) {
+  n = parseFloat(n);
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(0) + 'K';
+  return n.toFixed(0);
+}
+function fmtTime(s) {
+  if (!s) return '—';
+  return s.replace('T', ' ').slice(0, 16);
+}
+
+// ===== DASHBOARD =====
+async function loadDashboard() {
+  await Promise.all([loadAccount(), loadPositions(), loadCapitalLog()]);
+}
+
+async function loadAccount() {
+  try {
+    const res = await fetch('/api/account');
+    const data = await res.json();
+    const b = data.balance;
+
+    if (b) {
+      document.getElementById('totalBalance').textContent = fmtUSDT(b.total);
+      document.getElementById('availBalance').textContent = fmtUSDT(b.available);
+
+      const pnl = parseFloat(b.unrealized_pnl || 0);
+      const pnlEl = document.getElementById('unrealizedPnl');
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + fmtUSDT(pnl);
+      pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'green' : 'red');
+
+      document.getElementById('notionalPerOrder').textContent = fmtUSDT(b.notional_per_order);
+
+      const ratio = parseFloat(b.margin_ratio || 0);
+      document.getElementById('marginRatioBadge').textContent = ratio.toFixed(1) + '%';
+      const fill = document.getElementById('marginBarFill');
+      fill.style.width = Math.min(ratio, 100) + '%';
+      fill.className = 'margin-bar-fill ' + (ratio < 50 ? 'low' : ratio < 75 ? 'mid' : 'high');
+      document.getElementById('marginLimitLabel').textContent = '限制: ' + b.margin_limit_pct + '%';
+    }
+
+    // System status
+    const paused = data.paused || data.margin_pause;
+    const running = !paused;
+    const statusEl = document.getElementById('systemStatus');
+    const dotEl = document.getElementById('statusDot');
+    const textEl = document.getElementById('statusText');
+
+    if (data.paused) {
+      statusEl.className = 'status-pill paused';
+      dotEl.className = 'dot yellow';
+      textEl.textContent = '已暫停';
+    } else if (data.margin_pause) {
+      statusEl.className = 'status-pill paused';
+      dotEl.className = 'dot yellow';
+      textEl.textContent = '保證金暫停';
+    } else {
+      statusEl.className = 'status-pill running';
+      dotEl.className = 'dot green';
+      textEl.textContent = '運行中';
+    }
+
+    // Pause info
+    let pauseInfo = '';
+    if (data.roe_pause_symbols && data.roe_pause_symbols.length > 0) {
+      pauseInfo = '⚠️ ROE暫停開倉：' + data.roe_pause_symbols.join(', ');
+    }
+    document.getElementById('pauseInfo').textContent = pauseInfo;
+
+    // Candidate pool
+    const pool = data.candidate_pool || [];
+    const poolEl = document.getElementById('candidatePool');
+    if (pool.length === 0) {
+      poolEl.innerHTML = '<span style="color:var(--text3);font-size:12px">尚無候選</span>';
+    } else {
+      poolEl.innerHTML = pool.map(c =>
+        `<div class="candidate-chip" title="距15分上軌 ${c.dist_15m?.toFixed(2)}%" style="${c.volume_shrinking ? 'border-color:#16a34a;background:#f0fdf4;color:#16a34a' : ''}">${c.symbol.replace('USDT','')}${c.volume_shrinking ? ' 📉' : ''}</div>`
+      ).join('');
+    }
+
+  } catch(e) { console.error(e); }
+}
+
+async function loadPositions() {
+  try {
+    const res = await fetch('/api/positions');
+    const data = await res.json();
+    const bySymbol = data.positions || {};
+    const symbols = data.symbols || [];
+
+    document.getElementById('symbolCount').textContent = symbols.length;
+
+    const wrap = document.getElementById('positionsWrap');
+    if (symbols.length === 0) {
+      wrap.innerHTML = '<div style="text-align:center;padding:30px;color:var(--text3);font-size:13px">無持倉</div>';
+      return;
+    }
+
+    wrap.innerHTML = symbols.map(sym => {
+      const positions = bySymbol[sym] || [];
+      const totalMargin = positions.reduce((s, p) => s + (p.margin || 0), 0);
+      const totalNotional = positions.reduce((s, p) => s + (p.notional || 0), 0);
+      const avgEntry = positions.length > 0
+        ? positions.reduce((s, p) => s + p.entry_price * p.quantity, 0) /
+          positions.reduce((s, p) => s + p.quantity, 0) : 0;
+
+      return `
+        <div class="position-card">
+          <div class="position-header">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="position-sym">${sym.replace('USDT','')}</div>
+              <span class="badge badge-short">SHORT</span>
+              <span class="badge">${positions.length} 筆</span>
+            </div>
+            <button class="btn btn-danger btn-xs" onclick="confirmClose('${sym}')">強制平倉</button>
+          </div>
+          <div class="position-body">
+            <div class="pos-stats">
+              <div class="pos-stat">
+                <div class="pos-stat-label">平均入場價</div>
+                <div class="pos-stat-value">${fmt(avgEntry)}</div>
+              </div>
+              <div class="pos-stat">
+                <div class="pos-stat-label">總保證金</div>
+                <div class="pos-stat-value">${fmtUSDT(totalMargin)} USDT</div>
+              </div>
+              <div class="pos-stat">
+                <div class="pos-stat-label">合約總值</div>
+                <div class="pos-stat-value">${fmtUSDT(totalNotional)} USDT</div>
+              </div>
+            </div>
+            <div class="orders-list">
+              <div class="orders-list-title">各筆開倉</div>
+              ${positions.map((p, i) => `
+                <div class="order-row">
+                  <span>#${i+1} 入場 ${fmt(p.entry_price)}</span>
+                  <span>數量 ${p.quantity}</span>
+                  <span>${fmtTime(p.open_time)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function loadCapitalLog() {
+  try {
+    const res = await fetch('/api/capital_log');
+    const data = await res.json();
+    const el = document.getElementById('capitalLogList');
+    if (data.length === 0) {
+      el.innerHTML = '<div style="padding:8px;color:var(--text3)">無紀錄</div>';
+      return;
+    }
+    el.innerHTML = data.slice(0, 5).map(d =>
+      `<div style="padding:4px 0;border-bottom:1px solid var(--bg3);display:flex;justify-content:space-between">
+        <span>${d.type === 'DEPOSIT' ? '📥 入金' : '📤 出金'} ${fmtUSDT(d.amount)} USDT</span>
+        <span style="color:var(--text3)">${fmtTime(d.time)}</span>
+      </div>`
+    ).join('');
+  } catch(e) {}
+}
+
+async function addCapitalLog() {
+  const type = document.getElementById('capitalType').value;
+  const amount = parseFloat(document.getElementById('capitalAmount').value);
+  const note = document.getElementById('capitalNote').value;
+  if (!amount) return;
+  await fetch('/api/capital_log', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({type, amount, note})
+  });
+  document.getElementById('capitalAmount').value = '';
+  document.getElementById('capitalNote').value = '';
+  loadCapitalLog();
+}
+
+// ===== SYSTEM CONTROLS =====
+async function systemControl(action) {
+  await fetch('/api/control', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action})
+  });
+  await loadAccount();
+}
+
+function confirmStop() {
+  showModal('停止系統', '確定要停止整個交易系統？現有掛單不會自動取消。', () => systemControl('stop'));
+}
+
+function confirmClose(symbol) {
+  showModal('強制平倉', `確定要市價強制平倉 ${symbol.replace('USDT','')} 的所有倉位？`, async () => {
+    await fetch('/api/close/' + symbol, {method: 'POST'});
+    await loadPositions();
+  });
+}
+
+// ===== SCANNER =====
+async function loadScanner() {
+  try {
+    const res = await fetch('/api/scanner/data');
+    const data = await res.json();
+    scannerData = data.data || [];
+    const dot = data.is_scanning ? '🟡 掃描中...' : `🟢 ${data.last_updated || '—'}`;
+    document.getElementById('scannerStatus').textContent = dot;
+    renderScanner();
+  } catch(e) {}
+}
+
+async function manualScanRefresh() {
+  await fetch('/api/scanner/refresh', {method:'POST'});
+  setTimeout(loadScanner, 1000);
+}
+
+function renderScanner() {
+  const maxDist = parseFloat(document.getElementById('maxDist').value) || 999;
+  const minVol = parseFloat(document.getElementById('volFilter').value) || 0;
+  const search = document.getElementById('searchInput').value.trim().toUpperCase();
+
+  let filtered = scannerData.filter(d => {
+    if (d.dist_to_upper_pct > maxDist) return false;
+    if (minVol > 0 && (d.volume_usdt || 0) < minVol) return false;
+    if (search && !d.symbol.includes(search)) return false;
+    return true;
+  });
+
+  filtered.sort((a, b) => {
+    let av = a[scannerSortKey], bv = b[scannerSortKey];
+    if (typeof av === 'string') return scannerSortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    return scannerSortAsc ? av - bv : bv - av;
+  });
+
+  document.getElementById('scannerCount').textContent = filtered.length + ' 個幣';
+
+  const tbody = document.getElementById('scannerBody');
+  if (filtered.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text3)">無符合條件</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(d => {
+    const distClass = d.dist_to_upper_pct <= 0.5 ? 'dist-close' : d.dist_to_upper_pct <= 2 ? 'dist-mid' : 'dist-far';
+    const barColor = d.dist_to_upper_pct <= 0.5 ? '#2563eb' : d.dist_to_upper_pct <= 2 ? '#ea580c' : '#c8d0e0';
+    const barPct = Math.min(100, (d.dist_to_upper_pct / 5) * 100);
+    const bwClass = d.band_width_pct >= 3 ? 'bw-wide' : '';
+    return `<tr>
+      <td class="sym-name">${d.symbol}</td>
+      <td style="font-family:var(--mono)">${fmt(d.price)}</td>
+      <td style="font-family:var(--mono)">${fmt(d.upper)}</td>
+      <td>
+        <div class="dist-bar-wrap">
+          <span class="${distClass}" style="font-family:var(--mono);min-width:48px;text-align:right">${d.dist_to_upper_pct.toFixed(2)}%</span>
+          <div class="dist-bar"><div class="dist-bar-fill" style="width:${barPct}%;background:${barColor}"></div></div>
+        </div>
+      </td>
+      <td class="${bwClass}" style="font-family:var(--mono)">${d.band_width_pct.toFixed(2)}%</td>
+      <td style="font-family:var(--mono);color:var(--text3)">${fmtVol(d.volume_usdt || 0)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function sortScanner(key) {
+  if (scannerSortKey === key) scannerSortAsc = !scannerSortAsc;
+  else { scannerSortKey = key; scannerSortAsc = true; }
+  ['symbol','price','upper','dist','bw'].forEach(k => {
+    const el = document.getElementById('sh-' + k);
+    if (el) el.textContent = '↕';
+  });
+  const map = {symbol:'sh-symbol',price:'sh-price',upper:'sh-upper',dist_to_upper_pct:'sh-dist',band_width_pct:'sh-bw'};
+  if (map[key]) document.getElementById(map[key]).textContent = scannerSortAsc ? '↑' : '↓';
+  renderScanner();
+}
+
+// ===== REPORTS =====
+async function loadReports() {
+  try {
+    const [histRes, dailyRes, curveRes] = await Promise.all([
+      fetch('/api/reports/history').then(r => r.json()),
+      fetch('/api/reports/daily').then(r => r.json()),
+      fetch('/api/reports/pnl_curve').then(r => r.json())
+    ]);
+
+    // Summary
+    const totalTrades = histRes.length;
+    const wins = histRes.filter(h => h.total_pnl > 0).length;
+    const totalPnl = histRes.reduce((s, h) => s + (h.total_pnl || 0), 0);
+    const winRate = totalTrades > 0 ? (wins / totalTrades * 100) : 0;
+
+    document.getElementById('totalTrades').textContent = totalTrades;
+    document.getElementById('winRate').textContent = winRate.toFixed(1) + '%';
+    const pnlEl = document.getElementById('totalPnl');
+    pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + fmtUSDT(totalPnl);
+    pnlEl.className = 'stat-value ' + (totalPnl >= 0 ? 'green' : 'red');
+
+    // Today PnL
+    const today = dailyRes[0];
+    if (today) {
+      const todayEl = document.getElementById('todayPnl');
+      todayEl.textContent = (today.pnl >= 0 ? '+' : '') + fmtUSDT(today.pnl);
+      todayEl.className = 'stat-value ' + (today.pnl >= 0 ? 'green' : 'red');
+    }
+
+    // PnL Curve
+    drawPnlChart(curveRes);
+
+    // History table
+    const hBody = document.getElementById('historyBody');
+    if (histRes.length === 0) {
+      hBody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:30px;color:var(--text3)">無紀錄</td></tr>';
+    } else {
+      hBody.innerHTML = histRes.map(h => {
+        const pnlClass = h.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+        const capPct = (h.roe_pct || 0);
+        return `<tr>
+          <td class="sym-name">${(h.symbol||'').replace('USDT','')}</td>
+          <td style="font-family:var(--mono);font-size:11px">${fmtTime(h.open_time)}</td>
+          <td style="font-family:var(--mono);font-size:11px">${fmtTime(h.close_time)}</td>
+          <td style="font-family:var(--mono)">${fmt(h.avg_entry_price)}</td>
+          <td style="font-family:var(--mono)">${fmt(h.close_price)}</td>
+          <td style="text-align:center">${h.position_count}</td>
+          <td class="${pnlClass}" style="font-family:var(--mono)">${(h.total_pnl>=0?'+':'') + fmtUSDT(h.total_pnl)}</td>
+          <td class="${pnlClass}" style="font-family:var(--mono)">${(capPct>=0?'+':'') + fmtPct(capPct)}</td>
+          <td style="font-size:11px;color:var(--text3)">${h.close_reason||'—'}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Daily table
+    const dBody = document.getElementById('dailyBody');
+    if (dailyRes.length === 0) {
+      dBody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text3)">無紀錄</td></tr>';
+    } else {
+      dBody.innerHTML = dailyRes.map(d => {
+        const wr = d.trades > 0 ? (d.wins / d.trades * 100).toFixed(1) + '%' : '—';
+        const pnlClass = d.pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+        return `<tr>
+          <td style="font-family:var(--mono)">${d.date}</td>
+          <td style="text-align:center">${d.trades}</td>
+          <td style="text-align:center">${d.wins}</td>
+          <td>${wr}</td>
+          <td class="${pnlClass}" style="font-family:var(--mono)">${(d.pnl>=0?'+':'') + fmtUSDT(d.pnl)}</td>
+        </tr>`;
+      }).join('');
+    }
+
+  } catch(e) { console.error(e); }
+}
+
+function drawPnlChart(data) {
+  const canvas = document.getElementById('pnlChart');
+  const emptyEl = document.getElementById('pnlChartEmpty');
+  if (!data || data.length === 0) {
+    canvas.style.display = 'none';
+    emptyEl.style.display = 'block';
+    return;
+  }
+  canvas.style.display = 'block';
+  emptyEl.style.display = 'none';
+
+  const ctx = canvas.getContext('2d');
+  const W = canvas.offsetWidth, H = 200;
+  canvas.width = W; canvas.height = H;
+
+  const values = data.map(d => d.cumulative_pnl);
+  const min = Math.min(0, ...values);
+  const max = Math.max(0, ...values);
+  const range = max - min || 1;
+
+  const pad = {top: 20, right: 20, bottom: 30, left: 60};
+  const w = W - pad.left - pad.right;
+  const h = H - pad.top - pad.bottom;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Grid
+  ctx.strokeStyle = '#eef1f6';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (h / 4) * i;
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + w, y); ctx.stroke();
+  }
+
+  // Zero line
+  const zeroY = pad.top + h - ((0 - min) / range) * h;
+  ctx.strokeStyle = '#c8d0e0';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(pad.left, zeroY); ctx.lineTo(pad.left + w, zeroY); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Curve
+  const points = data.map((d, i) => ({
+    x: pad.left + (i / Math.max(data.length - 1, 1)) * w,
+    y: pad.top + h - ((d.cumulative_pnl - min) / range) * h
+  }));
+
+  // Fill
+  const lastVal = values[values.length - 1];
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + h);
+  if (lastVal >= 0) {
+    grad.addColorStop(0, 'rgba(22,163,74,0.2)');
+    grad.addColorStop(1, 'rgba(22,163,74,0)');
+  } else {
+    grad.addColorStop(0, 'rgba(220,38,38,0)');
+    grad.addColorStop(1, 'rgba(220,38,38,0.2)');
+  }
+
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, zeroY);
+  points.forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.lineTo(points[points.length - 1].x, zeroY);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  ctx.strokeStyle = lastVal >= 0 ? '#16a34a' : '#dc2626';
+  ctx.lineWidth = 2;
+  points.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+  ctx.stroke();
+
+  // Y axis labels
+  ctx.fillStyle = '#8892a8';
+  ctx.font = '11px DM Mono, monospace';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const val = min + (range / 4) * (4 - i);
+    const y = pad.top + (h / 4) * i;
+    ctx.fillText((val >= 0 ? '+' : '') + val.toFixed(1), pad.left - 6, y + 4);
+  }
+}
+
+// ===== SETTINGS =====
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/config');
+    configData = await res.json();
+    renderSettings();
+  } catch(e) {}
+}
+
+const CONFIG_LABELS = {
+  capital_per_order_pct: ['每單資金佔比 %', '帳戶餘額的百分比'],
+  leverage: ['槓桿倍數', ''],
+  take_profit_capital_pct: ['止盈（本金+%）', '本金增加此%時平倉（幣種累積所有倉位）'],
+  pause_open_capital_pct: ['暫停開倉（本金-%）', '單幣種本金虧損此%時停止對該幣種開新倉（負數）'],
+  force_close_capital_pct: ['強制平倉（本金-%）', '單幣種本金虧損此%時強制市價全平（負數）'],
+  margin_usage_limit_pct: ['保證金使用率上限 %', '超過此值停止開新倉'],
+  grid_spacing_pct: ['網格間距 %', ''],
+  grid_down_count: ['下方網格數量', ''],
+  max_symbols: ['最多持倉幣種數', ''],
+  candidate_pool_size: ['候選監控池大小', ''],
+  min_volume_usdt: ['最低24H成交量（USDT）', '避免滑價'],
+  max_dist_to_upper_pct: ['15分K距上軌上限 %', ''],
+  max_dist_1h_upper_pct: ['1小時K距上軌上限 %', ''],
+  min_band_width_pct: ['最低帶寬 %', ''],
+  prev_high_lookback: ['前高保護回看K棒數', ''],
+  volume_spike_multiplier: ['成交量異常倍數', '超過均量N倍跳過'],
+  volume_shrink_lookback: ['量縮回看K棒數', '計算均量的K棒數量'],
+  volume_shrink_threshold: ['量縮門檻', '當前量 < 均量 × 此值視為量縮（優先進候選池）'],
+  single_candle_max_rise_pct: ['單K最大漲幅 %', '超過此值不開倉'],
+  candidate_pool_refresh_min: ['候選池更新間隔（分鐘）', '定時強制重新掃描，預設3分鐘'],
+  max_orders_per_symbol: ['單幣種最大開單數', '達到此數量後停止對該幣種開新倉'],
+  scale_after_order: ['加碼起始筆數', '超過此筆數後每單合約價值乘以加碼倍數'],
+  scale_multiplier: ['加碼倍數', '如1.5代表合約價值變為1.5倍'],
+};
+
+const CONFIG_SECTIONS = {
+  '開單設定': ['capital_per_order_pct', 'leverage', 'max_orders_per_symbol', 'scale_after_order', 'scale_multiplier'],
+  '止盈止損': ['take_profit_capital_pct', 'pause_open_capital_pct', 'force_close_capital_pct'],
+  '保護機制': ['margin_usage_limit_pct'],
+  '網格設定': ['grid_spacing_pct', 'grid_down_count'],
+  '持倉管理': ['max_symbols', 'candidate_pool_size', 'candidate_pool_refresh_min'],
+  '篩選條件': ['min_volume_usdt', 'max_dist_to_upper_pct', 'max_dist_1h_upper_pct', 'min_band_width_pct', 'prev_high_lookback', 'volume_spike_multiplier', 'single_candle_max_rise_pct', 'volume_shrink_lookback', 'volume_shrink_threshold'],
+};
+
+function renderSettings() {
+  const grid = document.getElementById('configGrid');
+  let html = '';
+  for (const [section, keys] of Object.entries(CONFIG_SECTIONS)) {
+    html += `<div class="config-section-title">${section}</div>`;
+    for (const key of keys) {
+      const [label, hint] = CONFIG_LABELS[key] || [key, ''];
+      const val = configData[key] ?? '';
+      html += `
+        <div class="config-row">
+          <div class="config-label">${label}</div>
+          ${hint ? `<div style="font-size:10px;color:var(--text3);margin-bottom:2px">${hint}</div>` : ''}
+          <input class="config-input" id="cfg-${key}" type="number" value="${val}" step="any">
+        </div>
+      `;
+    }
+  }
+  grid.innerHTML = html;
+}
+
+async function saveConfig() {
+  const update = {};
+  for (const keys of Object.values(CONFIG_SECTIONS)) {
+    for (const key of keys) {
+      const el = document.getElementById('cfg-' + key);
+      if (el) update[key] = parseFloat(el.value);
+    }
+  }
+  await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(update)
+  });
+  alert('設定已儲存！');
+}
+
+// ===== MODAL =====
+let modalCallback = null;
+function showModal(title, body, onConfirm) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').textContent = body;
+  document.getElementById('modalOverlay').classList.add('open');
+  modalCallback = onConfirm;
+}
+function closeModal() {
+  document.getElementById('modalOverlay').classList.remove('open');
+  modalCallback = null;
+}
+document.getElementById('modalConfirmBtn').onclick = async () => {
+  if (modalCallback) await modalCallback();
+  closeModal();
+};
+
+// ===== AUTO REFRESH =====
+function startAutoRefresh() {
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => {
+    if (currentPage === 'dashboard') loadDashboard();
+    if (currentPage === 'scanner') loadScanner();
+  }, 15000);
+}
+
+
+// ===== LOGS =====
+async function loadLogs() {
+  try {
+    const type = document.getElementById('logTypeFilter').value;
+    const symbol = document.getElementById('logSymbolFilter').value.trim().toUpperCase();
+    let url = '/api/logs?limit=200';
+    if (type) url += '&event_type=' + type;
+    if (symbol) url += '&symbol=' + symbol;
+    
+    const [logsRes, summaryRes] = await Promise.all([
+      fetch(url).then(r => r.json()),
+      fetch('/api/logs/summary').then(r => r.json())
+    ]);
+
+    // Summary chips
+    const grid = document.getElementById('logSummaryGrid');
+    grid.innerHTML = summaryRes.map(s => `
+      <div class="stat-card" style="cursor:pointer" onclick="document.getElementById('logTypeFilter').value='${s.event_type}';loadLogs()">
+        <div class="stat-label">${s.event_type}</div>
+        <div class="stat-value" style="font-size:20px">${s.count}</div>
+      </div>
+    `).join('');
+
+    const eventColors = {"SCAN": "#2563eb", "FILTER": "#8892a8", "TRIGGER": "#16a34a", "ORDER": "#16a34a", "BLACK_K": "#1a2035", "TP": "#16a34a", "FORCE_CLOSE": "#dc2626", "ROE_PAUSE": "#ea580c", "ROE_RESUME": "#16a34a", "ROE_FORCE": "#dc2626", "ERROR": "#dc2626"};
+
+    // Logs table
+    const tbody = document.getElementById('logsBody');
+    if (logsRes.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text3)">無日誌紀錄</td></tr>';
+      return;
+    }
+    tbody.innerHTML = logsRes.map((log, i) => {
+      const color = eventColors[log.event_type] || '#8892a8';
+      const sym = log.symbol ? log.symbol.replace('USDT','') : '—';
+      return `<tr>
+        <td style="font-family:var(--mono);font-size:11px;color:var(--text3)">${fmtTime(log.time)}</td>
+        <td><span style="background:${color}15;color:${color};padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;font-family:var(--mono)">${log.event_type}</span></td>
+        <td style="font-family:var(--mono);font-weight:700">${sym}</td>
+        <td style="font-size:12px;color:var(--text2)">${log.note || '—'}</td>
+        <td><button class="btn btn-ghost btn-xs" onclick="showLogDetail(${i}, ${JSON.stringify(JSON.stringify(log))})">▶</button></td>
+      </tr>`;
+    }).join('');
+
+    // Store for export
+    window._currentLogs = logsRes;
+  } catch(e) { console.error(e); }
+}
+
+function showLogDetail(i, logJson) {
+  const log = JSON.parse(logJson);
+  let detail = log.detail ? JSON.parse(log.detail) : {};
+  const content = JSON.stringify({
+    time: log.time,
+    event: log.event_type,
+    symbol: log.symbol,
+    note: log.note,
+    detail: detail
+  }, null, 2);
+  document.getElementById('logDetailContent').textContent = content;
+  document.getElementById('logDetailPanel').style.display = 'block';
+  document.getElementById('logDetailPanel').scrollIntoView({behavior:'smooth'});
+}
+
+function exportLogs() {
+  const logs = window._currentLogs || [];
+  if (logs.length === 0) { alert('無日誌可匯出'); return; }
+  const lines = logs.map(l => {
+    const d = l.detail ? JSON.parse(l.detail) : {};
+    return `[${l.time}] ${l.event_type} ${l.symbol||''}: ${l.note} | ${JSON.stringify(d)}`;
+  }).join('\n');
+  const text = `BB Grid Trader 日誌 (${logs.length}筆)\n${'='.repeat(60)}\n${lines}`;
+  navigator.clipboard.writeText(text).then(() => alert(`已複製 ${logs.length} 筆日誌到剪貼板！\n直接貼給Claude分析即可。`));
+}
+
+// ===== INIT =====
+loadDashboard();
+startAutoRefresh();
+</script>
+
+<!-- ========== PAGE: LOGS ========== -->
+<div class="page" id="page-logs">
+  <div class="stats-grid section" id="logSummaryGrid">
+    <div class="stat-card"><div class="stat-label">載入中</div></div>
+  </div>
+
+  <div class="filter-bar">
+    <span class="filter-label">事件類型</span>
+    <select class="filter-select" id="logTypeFilter" onchange="loadLogs()">
+      <option value="">全部</option>
+      <option value="SCAN">SCAN 掃描</option>
+      <option value="FILTER">FILTER 過濾</option>
+      <option value="TRIGGER">TRIGGER 觸價</option>
+      <option value="ORDER">ORDER 下單</option>
+      <option value="BLACK_K">BLACK_K 黑K</option>
+      <option value="TP">TP 止盈</option>
+      <option value="FORCE_CLOSE">FORCE_CLOSE 強平</option>
+      <option value="ROE_PAUSE">ROE_PAUSE 暫停</option>
+      <option value="ROE_RESUME">ROE_RESUME 恢復</option>
+      <option value="ERROR">ERROR 錯誤</option>
+    </select>
+    <span class="filter-label">幣種</span>
+    <input class="filter-input" id="logSymbolFilter" type="text" placeholder="BTCUSDT" style="width:100px">
+    <button class="btn btn-ghost btn-sm" onclick="loadLogs()">篩選</button>
+    <button class="btn btn-primary btn-sm" onclick="exportLogs()">📋 複製給Claude分析</button>
+  </div>
+
+  <div class="card">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:140px">時間</th>
+            <th style="width:110px">事件</th>
+            <th style="width:100px">幣種</th>
+            <th>摘要</th>
+            <th style="width:40px">詳情</th>
+          </tr>
+        </thead>
+        <tbody id="logsBody">
+          <tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text3)">載入中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="logDetailPanel" style="display:none;margin-top:12px">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">詳細數據</div>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('logDetailPanel').style.display='none'">關閉</button>
+      </div>
+      <div class="card-body">
+        <pre id="logDetailContent" style="font-family:var(--mono);font-size:12px;color:var(--text);white-space:pre-wrap;word-break:break-all;background:var(--bg3);padding:12px;border-radius:6px;max-height:300px;overflow-y:auto"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
