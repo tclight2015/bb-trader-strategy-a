@@ -62,9 +62,18 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             saved = json.load(f)
-        # Merge with defaults (in case new keys added)
         cfg = DEFAULT_CONFIG.copy()
         cfg.update(saved)
+        # 環境變數的 API key 永遠優先（不被 JSON 蓋掉）
+        env_key = os.environ.get("BINANCE_API_KEY", "")
+        env_secret = os.environ.get("BINANCE_API_SECRET", "")
+        env_testnet = os.environ.get("BINANCE_TESTNET", "")
+        if env_key:
+            cfg["api_key"] = env_key
+        if env_secret:
+            cfg["api_secret"] = env_secret
+        if env_testnet:
+            cfg["testnet"] = env_testnet.lower() == "true"
         return cfg
     return DEFAULT_CONFIG.copy()
 
