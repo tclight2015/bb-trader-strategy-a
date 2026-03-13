@@ -186,8 +186,8 @@ async def scan_candidates(cfg, session=None):
                 if dist_1h < -0.3 or dist_1h > cfg["max_dist_1h_upper_pct"]:  # 允許略超上軌0.3%
                     continue
 
-                # 前高保護
-                if not check_prev_high(k15, price, cfg["prev_high_lookback"]):
+                # 前高保護（設為0則跳過）
+                if cfg["prev_high_lookback"] > 0 and not check_prev_high(k15, price, cfg["prev_high_lookback"]):
                     write_log("FILTER", f"前高保護過濾", symbol=sym,
                               detail={"reason": "no_prev_high", "price": price,
                                       "lookback": cfg["prev_high_lookback"]})
