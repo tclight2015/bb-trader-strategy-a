@@ -129,13 +129,16 @@ async def scan_candidates(cfg, session=None):
         hourly = set()
         all_symbols = []
         for sym in exinfo.get("symbols", []):
-            if (sym["contractType"] == "PERPETUAL" and
-                    sym["quoteAsset"] == "USDT" and
-                    sym["status"] == "TRADING"):
-                if sym.get("fundingIntervalHours", 8) == 1:
-                    hourly.add(sym["symbol"])
-                else:
-                    all_symbols.append(sym["symbol"])
+            try:
+                if (sym.get("contractType") == "PERPETUAL" and
+                        sym.get("quoteAsset") == "USDT" and
+                        sym.get("status") == "TRADING"):
+                    if sym.get("fundingIntervalHours", 8) == 1:
+                        hourly.add(sym["symbol"])
+                    else:
+                        all_symbols.append(sym["symbol"])
+            except Exception:
+                continue
 
         # 批次掃描
         candidates = []

@@ -41,15 +41,18 @@ async def fetch_json(session, url, params=None):
 
 async def get_all_symbols(session):
     data = await fetch_json(session, f"{BINANCE_BASE}/fapi/v1/exchangeInfo")
-    if not data:
+    if not data or "symbols" not in data:
         return []
-    symbols = [
-        s["symbol"] for s in data["symbols"]
-        if s["contractType"] == "PERPETUAL" and
-           s["quoteAsset"] == "USDT" and
-           s["status"] == "TRADING" and
-           s.get("fundingIntervalHours", 8) != 1
-    ]
+    symbols = []
+    for s in data["symbols"]:
+        try:
+            if (s.get("contractType") == "PERPETUAL" and
+                    s.get("quoteAsset") == "USDT" and
+                    s.get("status") == "TRADING" and
+                    s.get("fundingIntervalHours", 8) != 1):
+                symbols.append(s["symbol"])
+        except Exception:
+            continue
     return symbols
 
 
