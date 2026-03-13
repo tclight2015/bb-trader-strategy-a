@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
-TESTNET_BASE = "https://testnet.binancefuture.com"
+TESTNET_BASE = "https://demo-fapi.binance.com"
 LIVE_BASE = "https://fapi.binance.com"
 
 
