@@ -128,6 +128,14 @@ async def run_scan():
     scanner_cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     scanner_cache["is_scanning"] = False
 
+    # 同步給交易引擎用（第一段初篩來源）
+    # 統一欄位名稱：dist_to_upper_pct -> dist_to_upper
+    from trader import state as trader_state
+    trader_state["scanner_latest_result"] = [
+        {**r, "dist_to_upper": r.get("dist_to_upper_pct", 0)}
+        for r in results
+    ]
+
 
 def run_scan_sync():
     loop = asyncio.new_event_loop()
