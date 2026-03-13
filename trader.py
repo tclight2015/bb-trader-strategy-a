@@ -31,6 +31,7 @@ state = {
     "roe_pause_symbols": set(),    # 單幣種ROE暫停
     "candidate_pool": [],          # 候選監控池 [{symbol, upper_price, ...}]
     "pending_orders": {},          # symbol -> [order_id, ...]  掛單追蹤
+    "triggered_symbols": set(),    # 已觸發開倉的幣種（防重複）
     "black_k_targets": {},         # symbol -> target_price  黑K訊號追蹤
     "last_scan_result": [],        # 最新掃描結果
 }
@@ -112,6 +113,8 @@ async def try_open_position(client, cfg, symbol, entry_price, grid_level=0):
     # 取帳戶餘額
     balance = await client.get_balance()
     if not balance:
+        write_log("ERROR", f"帳戶餘額取得失敗，跳過下單（api_key={'有' if cfg.get('api_key') else '空'}）",
+                  symbol=symbol, detail={"api_key_len": len(cfg.get('api_key',''))})
         return False
 
     # 保證金水位檢查
@@ -436,17 +439,18 @@ async def trading_loop():
                 # 觸價條件：價格觸碰到15分K上軌
                 if current_price >= upper * 0.9995:  # 允許0.05%誤差
                     # 首次觸發：建立下方網格並開第一單
-                    if sym not in [s for s in open_syms]:
+                    already = sym in open_syms or sym in state["triggered_symbols"]
+                    if not already:
                         logger.info(f"🎯 觸價 {sym} @ {current_price} 上軌={upper}")
                         write_log("TRIGGER", f"觸碰1分K上軌，開第一單", symbol=sym,
                                   detail={"price": current_price, "upper_15m": upper,
                                           "dist_pct": round((current_price - upper) / upper * 100, 4)})
 
+                        state["triggered_symbols"].add(sym)  # 先標記，防重複
                         # 開第一單
                         success = await try_open_position(client, cfg, sym, upper, grid_level=0)
                         if success:
                             open_syms = get_open_symbols()
-
                             # 建立下方網格
                             grid_prices = calc_grid_prices(
                                 upper,
@@ -456,6 +460,12 @@ async def trading_loop():
                             )
                             save_grids(sym, grid_prices, "DOWN")
                             logger.info(f"網格建立 {sym}: {grid_prices}")
+                        else:
+                            state["triggered_symbols"].discard(sym)  # 失敗則移除，下次可重試
+
+                # 價格離開上軌，解除觸發鎖定（允許下次再觸發）
+                if current_price < upper * 0.998 and sym in state["triggered_symbols"]:
+                    state["triggered_symbols"].discard(sym)
 
                 # 策略A往上：偵測黑K
                 if current_price > upper:
