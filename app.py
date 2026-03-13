@@ -62,6 +62,11 @@ async def get_klines(session, symbol):
         "symbol": symbol, "interval": "15m", "limit": 25
     })
 
+async def get_klines_1h(session, symbol):
+    return await fetch_json(session, f"{BINANCE_BASE}/fapi/v1/klines", {
+        "symbol": symbol, "interval": "1h", "limit": 25
+    })
+
 
 def calc_bollinger(klines, period=20, std_mult=2.0):
     if not klines or len(klines) < period:
@@ -79,7 +84,10 @@ def calc_bollinger(klines, period=20, std_mult=2.0):
 
 
 async def scan_symbol(session, symbol):
-    klines = await get_klines(session, symbol)
+    klines, klines_1h = await asyncio.gather(
+        get_klines(session, symbol),
+        get_klines_1h(session, symbol)
+    )
     if not klines:
         return None
     bb = calc_bollinger(klines)
@@ -94,6 +102,14 @@ async def scan_symbol(session, symbol):
     if band_width_pct < 1.0:
         return None
     dist_to_upper_pct = (upper - price) / upper * 100
+
+    # 1小時K距上軌
+    dist_1h_pct = None
+    if klines_1h:
+        bb1h = calc_bollinger(klines_1h)
+        if bb1h and bb1h["upper"] > 0:
+            dist_1h_pct = (bb1h["upper"] - price) / bb1h["upper"] * 100
+
     return {
         "symbol": symbol.replace("USDT", ""),
         "full_symbol": symbol,
@@ -102,6 +118,7 @@ async def scan_symbol(session, symbol):
         "middle": middle,
         "lower": bb["lower"],
         "dist_to_upper_pct": dist_to_upper_pct,
+        "dist_1h_pct": dist_1h_pct,
         "band_width_pct": band_width_pct,
     }
 
@@ -128,14 +145,24 @@ async def run_scan():
     scanner_cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     scanner_cache["is_scanning"] = False
 
-    # 同步給交易引擎用（只傳已通過距上軌篩選的結果）
+    # 同步給交易引擎：按15分K距離排序取前N，再按1H距離排序取候選池大小
     from trader import state as trader_state
     cfg = load_config()
     max_dist = cfg.get("max_dist_to_upper_pct", 1.0)
+    pre_scan_size = cfg.get("pre_scan_size", 20)     # 先取前N個（按15分K距離）
+    pool_size = cfg.get("candidate_pool_size", 10)   # 再從中取前M個（按1H距離）
+
+    # 第一步：15分K距上軌篩選，取前pre_scan_size個
+    filtered = [r for r in results if r.get("dist_to_upper_pct", 999) <= max_dist]
+    top_15m = filtered[:pre_scan_size]  # 已按dist_to_upper_pct排序
+
+    # 第二步：按1H距離排序，取前pool_size個（沒有1H資料的排後面）
+    top_15m.sort(key=lambda x: x.get("dist_1h_pct", 999) if x.get("dist_1h_pct") is not None else 999)
+    final_pool = top_15m[:pool_size]
+
     trader_state["scanner_latest_result"] = [
         {**r, "dist_to_upper": r.get("dist_to_upper_pct", 0)}
-        for r in results
-        if r.get("dist_to_upper_pct", 999) <= max_dist
+        for r in final_pool
     ]
 
 
@@ -298,6 +325,7 @@ def api_config_set():
         "pause_open_capital_pct", "force_close_capital_pct",
         "margin_usage_limit_pct", "min_volume_usdt", "candidate_pool_refresh_min",
         "max_orders_per_symbol", "scale_after_order", "scale_multiplier",
+        "pre_scan_size",
         "volume_shrink_lookback", "volume_shrink_threshold",
         "max_dist_to_upper_pct", "max_dist_1h_upper_pct",
         "min_band_width_pct", "prev_high_lookback",

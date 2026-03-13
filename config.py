@@ -4,10 +4,10 @@ import os
 CONFIG_FILE = "trading_config.json"
 
 DEFAULT_CONFIG = {
-    # === 帳戶設定 ===
-    "api_key": "HSfsVaFKyG7HcjV0OqDwtDfU0Su8646AkOYVcCm0vjUsVbC6bf2Ly81cKyP9cJ1p",
-    "api_secret": "7p4oRCCmHV5EjbsPt065RDmSwVMFuP0oGh4O5oYwsTnfxlD81tu6LTIQ3LYrU5FA",
-    "testnet": True,
+    # === 帳戶設定（從環境變數讀取）===
+    "api_key": os.environ.get("BINANCE_API_KEY", ""),
+    "api_secret": os.environ.get("BINANCE_API_SECRET", ""),
+    "testnet": os.environ.get("BINANCE_TESTNET", "true").lower() == "true",
 
     # === 開單設定 ===
     "capital_per_order_pct": 1.0,      # 每單保證金佔帳戶餘額%
@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     # === 持倉管理 ===
     "max_symbols": 3,                   # 最多持倉幣種數
     "candidate_pool_size": 10,          # 候選監控池大小
+    "pre_scan_size": 20,               # 先從15分K取前N個，再從中按1H取候選池
 
     # === 止盈止損（基於本金%，非ROE%）===
     "take_profit_capital_pct": 30.0,   # 止盈：本金賺X%

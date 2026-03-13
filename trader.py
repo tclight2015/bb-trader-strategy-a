@@ -44,151 +44,34 @@ def get_client(cfg):
 
 async def scan_candidates(cfg, scanner_data=None):
     """
-    兩段式篩選：
-    第一段 - 複用掃描器頁面已跑好的結果（距15分上軌已篩好）
-    第二段 - 只針對這些幣抓1小時K，做前高保護 + 1H距上軌 + 帶寬篩選
+    候選池直接使用掃描器已處理好的結果
+    掃描器已完成：15分K初篩 → 取前N個 → 按1H距離排序 → 取前M個
     """
-    import aiohttp as aiohttp_lib
-    import math as math_lib
-
-    BINANCE_BASE = "https://fapi.binance.com"
-
-    async def fetch(s, url, params=None):
-        try:
-            async with s.get(url, params=params, timeout=aiohttp_lib.ClientTimeout(total=10)) as r:
-                return await r.json()
-        except:
-            return None
-
-    def calc_bb(klines, period=20, mult=2.0):
-        if not klines or len(klines) < period + 1:
-            return None
-        closes = [float(k[4]) for k in klines[:-1]]
-        window = closes[-period:]
-        mean = sum(window) / period
-        variance = sum((x - mean) ** 2 for x in window) / period
-        std = math_lib.sqrt(variance)
-        upper = mean + mult * std
-        current = float(klines[-2][4])
-        band_width_pct = (upper - mean) / mean * 100
-        return {"price": current, "upper": upper, "middle": mean, "std": std,
-                "band_width_pct": band_width_pct}
-
-    def check_prev_high(klines, current_price, lookback=5):
-        """前高保護：往前N根K棒中至少一根最高點 > 當前價"""
-        if not klines or len(klines) < lookback + 2:
-            return False
-        recent = klines[-(lookback + 2):-2]
-        highs = [float(k[2]) for k in recent]
-        return any(h > current_price for h in highs)
-
-    def check_volume_shrink(klines, lookback=10, threshold=0.7):
-        """量縮判斷：當前量 < 均量 × threshold"""
-        if not klines or len(klines) < lookback + 2:
-            return False
-        recent_vols = [float(k[5]) for k in klines[-(lookback+2):-2]]
-        avg_vol = sum(recent_vols) / len(recent_vols)
-        current_vol = float(klines[-2][5])
-        if avg_vol <= 0:
-            return False
-        return current_vol < avg_vol * threshold
-
-    # ===== 第一段：從掃描器結果取初篩名單 =====
-    # scanner_data 是掃描器頁面已跑好的結果（含距15分上軌%、成交量等）
     if not scanner_data:
         write_log("SCAN", "掃描器資料為空，跳過本次候選池更新")
         return []
 
-    # 從掃描器結果篩出符合距上軌條件的幣種
-    pre_filtered = []
+    candidates = []
     for item in scanner_data:
         try:
-            dist = float(item.get("dist_to_upper", 999))
-            volume = float(item.get("volume_usdt", 0))
-            band_width = float(item.get("band_width_pct", 0))
-            if (dist >= -0.3 and
-                dist <= cfg["max_dist_to_upper_pct"] and
-                volume >= cfg["min_volume_usdt"] and
-                band_width >= cfg["min_band_width_pct"]):
-                pre_filtered.append(item)
-        except:
+            candidates.append({
+                "symbol": item.get("full_symbol", item.get("symbol", "") + "USDT").replace("USDT","") + "USDT" if "USDT" not in item.get("symbol","") else item.get("full_symbol", item.get("symbol","")),
+                "price": float(item.get("price", 0)),
+                "upper_15m": float(item.get("upper", 0)),
+                "upper_1h": 0,
+                "dist_15m": float(item.get("dist_to_upper", item.get("dist_to_upper_pct", 0))),
+                "dist_1h": float(item.get("dist_1h_pct", 0)) if item.get("dist_1h_pct") is not None else 0,
+                "band_width_pct": float(item.get("band_width_pct", 0)),
+                "volume_usdt": float(item.get("volume_usdt", 0)),
+                "volume_shrinking": item.get("volume_shrinking", False),
+            })
+        except Exception as e:
             continue
 
-    write_log("SCAN", f"第一段初篩完成，共 {len(pre_filtered)} 個幣種（掃描器共 {len(scanner_data)} 個）",
-              detail={"scanner_total": len(scanner_data), "pre_filtered": len(pre_filtered)})
-
-    if not pre_filtered:
-        return []
-
-    # ===== 第二段：只對初篩幣種抓1小時K精細篩選 =====
-    candidates = []
-    async with aiohttp_lib.ClientSession() as s:
-        batch_size = 20
-        for i in range(0, len(pre_filtered), batch_size):
-            batch = pre_filtered[i:i + batch_size]
-            syms = [item["symbol"] for item in batch]
-
-            tasks_1h = [fetch(s, f"{BINANCE_BASE}/fapi/v1/klines",
-                              {"symbol": sym, "interval": "1h", "limit": 50}) for sym in syms]
-            tasks_15m = [fetch(s, f"{BINANCE_BASE}/fapi/v1/klines",
-                               {"symbol": sym, "interval": "15m", "limit": 50}) for sym in syms]
-
-            results_1h = await asyncio.gather(*tasks_1h)
-            results_15m = await asyncio.gather(*tasks_15m)
-            await asyncio.sleep(0.3)
-
-            for item, k1h, k15 in zip(batch, results_1h, results_15m):
-                sym = item["symbol"]
-                if not k1h or not k15:
-                    continue
-
-                bb1h = calc_bb(k1h)
-                bb15 = calc_bb(k15)
-                if not bb1h or not bb15:
-                    continue
-
-                price = bb15["price"]
-
-                # 1小時K距上軌篩選
-                dist_1h = (bb1h["upper"] - price) / bb1h["upper"] * 100
-                if dist_1h < -0.3 or dist_1h > cfg["max_dist_1h_upper_pct"]:
-                    continue
-
-                # 前高保護（設為0則跳過）
-                if cfg["prev_high_lookback"] > 0 and not check_prev_high(k15, price, cfg["prev_high_lookback"]):
-                    write_log("FILTER", f"前高保護過濾", symbol=sym,
-                              detail={"reason": "no_prev_high", "price": price,
-                                      "lookback": cfg["prev_high_lookback"]})
-                    continue
-
-                # 量縮判斷（優先排序用）
-                is_shrinking = check_volume_shrink(
-                    k15,
-                    cfg.get("volume_shrink_lookback", 10),
-                    cfg.get("volume_shrink_threshold", 0.7)
-                )
-
-                dist_15m = float(item.get("dist_to_upper", 0))
-                candidates.append({
-                    "symbol": sym,
-                    "price": price,
-                    "upper_15m": bb15["upper"],
-                    "upper_1h": bb1h["upper"],
-                    "dist_15m": dist_15m,
-                    "dist_1h": dist_1h,
-                    "band_width_pct": bb15["band_width_pct"],
-                    "volume_usdt": float(item.get("volume_usdt", 0)),
-                    "volume_shrinking": is_shrinking,
-                })
-
     write_log("SCAN", f"候選池更新，共 {len(candidates)} 個候選",
-              detail={"pre_filtered": len(pre_filtered), "passed": len(candidates)})
+              detail={"from_scanner": len(scanner_data), "candidates": len(candidates)})
 
-    # 排序：量縮優先，再按15分K距離，再按1小時K距離
-    candidates.sort(key=lambda x: (not x.get("volume_shrinking", False), x["dist_15m"], x["dist_1h"]))
-
-    pool_size = cfg.get("candidate_pool_size", 10)
-    return candidates[:pool_size]
+    return candidates
 
 
 # ===== 網格計算 =====
