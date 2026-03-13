@@ -128,12 +128,14 @@ async def run_scan():
     scanner_cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     scanner_cache["is_scanning"] = False
 
-    # 同步給交易引擎用（第一段初篩來源）
-    # 統一欄位名稱：dist_to_upper_pct -> dist_to_upper
+    # 同步給交易引擎用（只傳已通過距上軌篩選的結果）
     from trader import state as trader_state
+    cfg = load_config()
+    max_dist = cfg.get("max_dist_to_upper_pct", 1.0)
     trader_state["scanner_latest_result"] = [
         {**r, "dist_to_upper": r.get("dist_to_upper_pct", 0)}
         for r in results
+        if r.get("dist_to_upper_pct", 999) <= max_dist
     ]
 
 
