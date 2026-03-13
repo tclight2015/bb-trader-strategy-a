@@ -126,24 +126,27 @@ async def scan_symbol(session, symbol):
 async def run_scan():
     scanner_cache["is_scanning"] = True
     results = []
-    async with aiohttp.ClientSession() as session:
-        symbols = await get_all_symbols(session)
-        if not symbols:
-            scanner_cache["is_scanning"] = False
-            return
-        batch_size = 20
-        for i in range(0, len(symbols), batch_size):
-            batch = symbols[i:i + batch_size]
-            tasks = [scan_symbol(session, sym) for sym in batch]
-            batch_results = await asyncio.gather(*tasks)
-            for r in batch_results:
-                if r:
-                    results.append(r)
-            await asyncio.sleep(0.15)
-    results.sort(key=lambda x: x["dist_to_upper_pct"])
-    scanner_cache["data"] = results
-    scanner_cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    scanner_cache["is_scanning"] = False
+    try:
+        async with aiohttp.ClientSession() as session:
+            symbols = await get_all_symbols(session)
+            if not symbols:
+                return
+            batch_size = 20
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i + batch_size]
+                tasks = [scan_symbol(session, sym) for sym in batch]
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in batch_results:
+                    if r and not isinstance(r, Exception):
+                        results.append(r)
+                await asyncio.sleep(0.15)
+        results.sort(key=lambda x: x["dist_to_upper_pct"])
+        scanner_cache["data"] = results
+        scanner_cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        logger.error(f"掃描器錯誤: {e}", exc_info=True)
+    finally:
+        scanner_cache["is_scanning"] = False  # 不論成功失敗都要解鎖
 
     # 同步給交易引擎：按15分K距離排序取前N，再按1H距離排序取候選池大小
     from trader import state as trader_state
