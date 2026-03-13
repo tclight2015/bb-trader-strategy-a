@@ -3,7 +3,10 @@ import hashlib
 import time
 import aiohttp
 import asyncio
+import logging
 from urllib.parse import urlencode
+
+logger = logging.getLogger(__name__)
 
 TESTNET_BASE = "https://testnet.binancefuture.com"
 LIVE_BASE = "https://fapi.binance.com"
@@ -72,8 +75,13 @@ class BinanceClient:
 
     async def get_balance(self):
         """取得 USDT 可用餘額與總餘額"""
-        data = await self.get_account()
+        try:
+            data = await self.get_account()
+        except Exception as e:
+            logger.error(f"get_account 例外: {e}")
+            return None
         if "assets" not in data:
+            logger.error(f"get_balance 失敗，Binance回傳: {str(data)[:300]}")
             return None
         for asset in data["assets"]:
             if asset["asset"] == "USDT":
