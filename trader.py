@@ -57,11 +57,11 @@ async def scan_candidates(cfg, session=None):
 
     async def get_klines_15m(s, symbol):
         return await fetch(s, f"{BINANCE_BASE}/fapi/v1/klines",
-                          {"symbol": symbol, "interval": "15m", "limit": 25})
+                          {"symbol": symbol, "interval": "15m", "limit": 50})
 
     async def get_klines_1h(s, symbol):
         return await fetch(s, f"{BINANCE_BASE}/fapi/v1/klines",
-                          {"symbol": symbol, "interval": "1h", "limit": 25})
+                          {"symbol": symbol, "interval": "1h", "limit": 50})
 
     async def get_ticker_24h(s, symbol):
         return await fetch(s, f"{BINANCE_BASE}/fapi/v1/ticker/24hr", {"symbol": symbol})
