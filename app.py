@@ -3,6 +3,7 @@ import aiohttp
 import json
 import time
 import math
+import os
 import threading
 import logging
 from flask import Flask, jsonify, render_template, request
@@ -349,18 +350,18 @@ def api_logs():
 def api_logs_summary():
     return jsonify(get_log_summary())
 
+# 初始化DB（模組載入時執行，gunicorn 也能正常啟動）
+init_db()
+
+# 啟動掃描器背景執行緒
+_scanner_thread = threading.Thread(target=background_scanner)
+_scanner_thread.daemon = True
+_scanner_thread.start()
+
+# 啟動交易引擎背景執行緒
+_trader_thread = threading.Thread(target=start_trading_loop)
+_trader_thread.daemon = True
+_trader_thread.start()
+
 if __name__ == "__main__":
-    # 初始化DB
-    init_db()
-
-    # 啟動掃描器
-    scanner_thread = threading.Thread(target=background_scanner)
-    scanner_thread.daemon = True
-    scanner_thread.start()
-
-    # 啟動交易引擎
-    trader_thread = threading.Thread(target=start_trading_loop)
-    trader_thread.daemon = True
-    trader_thread.start()
-
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
