@@ -86,7 +86,7 @@ async def scan_candidates(cfg, session=None):
         variance = sum((x - mean) ** 2 for x in window) / period
         std = math_lib.sqrt(variance)
         upper = mean + mult * std
-        current = float(klines[-1][4])
+        current = float(klines[-2][4])  # 用最新已收盤K的收盤價，與BB計算一致
         band_width_pct = (upper - mean) / mean * 100
         return {"price": current, "upper": upper, "middle": mean, "std": std,
                 "band_width_pct": band_width_pct}
@@ -178,12 +178,12 @@ async def scan_candidates(cfg, session=None):
 
                 # 距15分K上軌篩選
                 dist_15m = (bb15["upper"] - price) / bb15["upper"] * 100
-                if dist_15m < 0 or dist_15m > cfg["max_dist_to_upper_pct"]:
+                if dist_15m < -0.3 or dist_15m > cfg["max_dist_to_upper_pct"]:  # 允許略超上軌0.3%
                     continue
 
                 # 距1小時K上軌篩選
                 dist_1h = (bb1h["upper"] - price) / bb1h["upper"] * 100
-                if dist_1h < 0 or dist_1h > cfg["max_dist_1h_upper_pct"]:
+                if dist_1h < -0.3 or dist_1h > cfg["max_dist_1h_upper_pct"]:  # 允許略超上軌0.3%
                     continue
 
                 # 前高保護
