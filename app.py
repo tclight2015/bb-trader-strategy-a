@@ -24,7 +24,7 @@ app = Flask(__name__)
 
 BINANCE_BASE = "https://fapi.binance.com"
 
-# ===== Scanner Cache（保留現有掃描器）=====
+# ===== Scanner Cache =====
 scanner_cache = {
     "data": [],
     "last_updated": None,
@@ -67,6 +67,13 @@ async def get_klines_1h(session, symbol):
         "symbol": symbol, "interval": "1h", "limit": 25
     })
 
+async def get_ticker_24h(session, symbol):
+    """取得24H成交量"""
+    data = await fetch_json(session, f"{BINANCE_BASE}/fapi/v1/ticker/24hr", {"symbol": symbol})
+    if data and "quoteVolume" in data:
+        return float(data["quoteVolume"])
+    return 0
+
 
 def calc_bollinger(klines, period=20, std_mult=2.0):
     if not klines or len(klines) < period:
@@ -84,9 +91,10 @@ def calc_bollinger(klines, period=20, std_mult=2.0):
 
 
 async def scan_symbol(session, symbol):
-    klines, klines_1h = await asyncio.gather(
+    klines, klines_1h, volume_usdt = await asyncio.gather(
         get_klines(session, symbol),
-        get_klines_1h(session, symbol)
+        get_klines_1h(session, symbol),
+        get_ticker_24h(session, symbol)
     )
     if not klines:
         return None
@@ -103,7 +111,6 @@ async def scan_symbol(session, symbol):
         return None
     dist_to_upper_pct = (upper - price) / upper * 100
 
-    # 1小時K距上軌
     dist_1h_pct = None
     if klines_1h:
         bb1h = calc_bollinger(klines_1h)
@@ -120,6 +127,7 @@ async def scan_symbol(session, symbol):
         "dist_to_upper_pct": dist_to_upper_pct,
         "dist_1h_pct": dist_1h_pct,
         "band_width_pct": band_width_pct,
+        "volume_usdt": volume_usdt,  # 新增：24H成交量
     }
 
 
@@ -146,20 +154,17 @@ async def run_scan():
     except Exception as e:
         logger.error(f"掃描器錯誤: {e}", exc_info=True)
     finally:
-        scanner_cache["is_scanning"] = False  # 不論成功失敗都要解鎖
+        scanner_cache["is_scanning"] = False
 
-    # 同步給交易引擎：按15分K距離排序取前N，再按1H距離排序取候選池大小
+    # 同步給交易引擎
     from trader import state as trader_state
     cfg = load_config()
     max_dist = cfg.get("max_dist_to_upper_pct", 1.0)
-    pre_scan_size = cfg.get("pre_scan_size", 20)     # 先取前N個（按15分K距離）
-    pool_size = cfg.get("candidate_pool_size", 10)   # 再從中取前M個（按1H距離）
+    pre_scan_size = cfg.get("pre_scan_size", 20)
+    pool_size = cfg.get("candidate_pool_size", 10)
 
-    # 第一步：15分K距上軌篩選，取前pre_scan_size個
     filtered = [r for r in results if r.get("dist_to_upper_pct", 999) <= max_dist]
-    top_15m = filtered[:pre_scan_size]  # 已按dist_to_upper_pct排序
-
-    # 第二步：按1H距離排序，取前pool_size個（沒有1H資料的排後面）
+    top_15m = filtered[:pre_scan_size]
     top_15m.sort(key=lambda x: x.get("dist_1h_pct", 999) if x.get("dist_1h_pct") is not None else 999)
     final_pool = top_15m[:pool_size]
 
@@ -183,14 +188,13 @@ def background_scanner():
         time.sleep(60)
 
 
-# ===== 帳戶資訊（從Binance取得）=====
+# ===== 帳戶資訊 =====
 
 async def get_account_info():
     cfg = load_config()
     client = get_client(cfg)
     try:
-        balance = await client.get_balance()
-        return balance
+        return await client.get_balance()
     except:
         return None
 
@@ -210,7 +214,6 @@ def index():
     return render_template("index.html")
 
 
-# --- Scanner API ---
 @app.route("/api/scanner/data")
 def api_scanner_data():
     return jsonify({
@@ -230,7 +233,6 @@ def api_scanner_refresh():
     return jsonify({"status": "started"})
 
 
-# --- 帳戶 API ---
 @app.route("/api/account")
 def api_account():
     balance = get_account_sync()
@@ -253,11 +255,9 @@ def api_account():
     })
 
 
-# --- 持倉 API ---
 @app.route("/api/positions")
 def api_positions():
     positions = get_open_positions()
-    # 按幣種分組
     by_symbol = {}
     for p in positions:
         sym = p["symbol"]
@@ -267,7 +267,6 @@ def api_positions():
     return jsonify({"positions": by_symbol, "symbols": list(by_symbol.keys())})
 
 
-# --- 手動平倉 API ---
 @app.route("/api/close/<symbol>", methods=["POST"])
 def api_close_symbol(symbol):
     cfg = load_config()
@@ -283,7 +282,6 @@ def api_close_symbol(symbol):
     return jsonify({"status": "ok", "symbol": symbol})
 
 
-# --- 系統控制 API ---
 @app.route("/api/control", methods=["POST"])
 def api_control():
     data = request.json
@@ -306,11 +304,9 @@ def api_control():
     return jsonify({"status": "ok", "action": action})
 
 
-# --- 設定 API ---
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
     cfg = load_config()
-    # 不回傳敏感資訊
     safe_cfg = {k: v for k, v in cfg.items()
                 if k not in ["api_key", "api_secret", "capital_transactions"]}
     return jsonify(safe_cfg)
@@ -320,11 +316,11 @@ def api_config_get():
 def api_config_set():
     cfg = load_config()
     data = request.json
-    # 允許更新的欄位
     allowed_keys = [
         "capital_per_order_pct", "leverage", "grid_spacing_pct",
-        "grid_down_count", "grid_up_count", "max_symbols",
+        "grid_down_count", "max_symbols",
         "candidate_pool_size", "take_profit_capital_pct",
+        "tp_limit_pct",                          # 新增：止盈拆單比例
         "pause_open_capital_pct", "force_close_capital_pct",
         "margin_usage_limit_pct", "min_volume_usdt", "candidate_pool_refresh_min",
         "max_orders_per_symbol", "scale_after_order", "scale_multiplier",
@@ -342,7 +338,6 @@ def api_config_set():
     return jsonify({"status": "ok"})
 
 
-# --- 報表 API ---
 @app.route("/api/reports/history")
 def api_history():
     return jsonify(get_trade_history(100))
@@ -358,7 +353,6 @@ def api_pnl_curve():
     return jsonify(get_cumulative_pnl())
 
 
-# --- 出入金 API ---
 @app.route("/api/capital_log", methods=["GET"])
 def api_capital_log_get():
     return jsonify(get_capital_log())
@@ -378,8 +372,6 @@ def api_capital_log_post():
     return jsonify({"status": "ok"})
 
 
-
-# --- 日誌 API ---
 @app.route("/api/logs")
 def api_logs():
     event_type = request.args.get("event_type")
@@ -391,15 +383,13 @@ def api_logs():
 def api_logs_summary():
     return jsonify(get_log_summary())
 
-# 初始化DB（模組載入時執行，gunicorn 也能正常啟動）
+
 init_db()
 
-# 啟動掃描器背景執行緒
 _scanner_thread = threading.Thread(target=background_scanner)
 _scanner_thread.daemon = True
 _scanner_thread.start()
 
-# 啟動交易引擎背景執行緒
 _trader_thread = threading.Thread(target=start_trading_loop)
 _trader_thread.daemon = True
 _trader_thread.start()

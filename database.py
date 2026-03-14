@@ -1,6 +1,7 @@
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+TZ_TAIPEI = timezone(timedelta(hours=8))
 
 DB_FILE = "trading.db"
 
@@ -120,7 +121,7 @@ def add_position(symbol, order_id, entry_price, quantity, notional, margin, leve
         INSERT INTO positions (symbol, order_id, side, entry_price, quantity, notional, margin, leverage, grid_level, open_time)
         VALUES (?, ?, 'SHORT', ?, ?, ?, ?, ?, ?, ?)
     """, (symbol, order_id, entry_price, quantity, notional, margin, leverage, grid_level,
-          datetime.now().isoformat()))
+          datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -170,7 +171,7 @@ def close_positions(symbol, close_price, close_reason="TP"):
     total_pnl = (avg_entry - close_price) * total_qty
     roe_pct = (total_pnl / total_margin) * 100 if total_margin > 0 else 0
 
-    close_time = datetime.now().isoformat()
+    close_time = datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")
 
     # Update positions
     conn.execute("""
@@ -212,7 +213,7 @@ def save_grids(symbol, grid_prices, direction="DOWN"):
         conn.execute("""
             INSERT INTO grids (symbol, price, direction, status, created_time)
             VALUES (?, ?, ?, 'PENDING', ?)
-        """, (symbol, price, direction, datetime.now().isoformat()))
+        """, (symbol, price, direction, datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -285,7 +286,7 @@ def add_capital_log(type_, amount, note, balance_after):
     conn.execute("""
         INSERT INTO capital_log (time, type, amount, note, balance_after)
         VALUES (?, ?, ?, ?, ?)
-    """, (datetime.now().isoformat(), type_, amount, note, balance_after))
+    """, (datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S"), type_, amount, note, balance_after))
     conn.commit()
     conn.close()
 
@@ -308,7 +309,7 @@ def write_log(event_type, note, symbol=None, detail=None):
     conn.execute("""
         INSERT INTO system_log (time, event_type, symbol, detail, note)
         VALUES (?, ?, ?, ?, ?)
-    """, (datetime.now().isoformat(), event_type, symbol,
+    """, (datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S"), event_type, symbol,
           _json.dumps(detail, ensure_ascii=False) if detail else None, note))
     conn.commit()
     conn.close()

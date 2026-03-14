@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
-TESTNET_BASE = "https://demo-fapi.binance.com"
+TESTNET_BASE = "https://testnet.binancefuture.com"
 LIVE_BASE = "https://fapi.binance.com"
 
 
@@ -101,8 +101,6 @@ class BinanceClient:
             params["symbol"] = symbol
         data = await self._get("/fapi/v2/positionRisk", params, signed=True)
         if isinstance(data, list):
-            if symbol:
-                return [p for p in data if float(p.get("positionAmt", 0)) != 0]
             return [p for p in data if float(p.get("positionAmt", 0)) != 0]
         return []
 
@@ -119,13 +117,6 @@ class BinanceClient:
                 return s
         return None
 
-    async def get_max_leverage(self, symbol):
-        """取得幣種最大槓桿"""
-        info = await self.get_symbol_info(symbol)
-        if info:
-            return info.get("leverageBracket", [{}])[0].get("initialLeverage", 20)
-        return 20
-
     async def get_price(self, symbol):
         data = await self._get("/fapi/v1/ticker/price", {"symbol": symbol})
         return float(data["price"]) if "price" in data else None
@@ -136,6 +127,34 @@ class BinanceClient:
             "interval": interval,
             "limit": limit
         })
+
+    async def get_24h_volume(self, symbol):
+        """取得24H成交量（USDT）"""
+        try:
+            data = await self._get("/fapi/v1/ticker/24hr", {"symbol": symbol})
+            return float(data.get("quoteVolume", 0))
+        except Exception:
+            return 0
+
+    # === 全倉模式設定 ===
+
+    async def set_margin_type(self, symbol, margin_type="CROSSED"):
+        """
+        設定保證金模式
+        margin_type: CROSSED（全倉）或 ISOLATED（逐倉）
+        若已是目標模式，Binance會回傳錯誤碼 -4046，直接忽略
+        """
+        result = await self._post("/fapi/v1/marginType", {
+            "symbol": symbol,
+            "marginType": margin_type
+        })
+        # -4046 = No need to change margin type（已是該模式，正常忽略）
+        if result.get("code") == -4046:
+            return True
+        if result.get("code") and result.get("code") != 200:
+            logger.warning(f"set_margin_type {symbol} {margin_type}: {result}")
+            return False
+        return True
 
     # === 槓桿設定 ===
 
@@ -151,7 +170,7 @@ class BinanceClient:
         """掛限價單"""
         params = {
             "symbol": symbol,
-            "side": side,           # BUY / SELL
+            "side": side,
             "type": "LIMIT",
             "timeInForce": "GTC",
             "quantity": quantity,
@@ -163,13 +182,31 @@ class BinanceClient:
         return await self._post("/fapi/v1/order", params)
 
     async def place_market_order(self, symbol, side, quantity, reduce_only=False):
-        """市價單（強制平倉用）"""
+        """市價單（即時執行）"""
         params = {
             "symbol": symbol,
             "side": side,
             "type": "MARKET",
             "quantity": quantity,
             "positionSide": "BOTH"
+        }
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        return await self._post("/fapi/v1/order", params)
+
+    async def place_stop_market_order(self, symbol, side, quantity, stop_price, reduce_only=True):
+        """
+        掛 Stop-Market 單（預掛，觸碰 stop_price 後自動市價執行）
+        用於止盈保底：預掛在交易所，程式當機也能自動出場
+        """
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": "STOP_MARKET",
+            "quantity": quantity,
+            "stopPrice": stop_price,
+            "positionSide": "BOTH",
+            "timeInForce": "GTE_GTC",  # 有效直到取消
         }
         if reduce_only:
             params["reduceOnly"] = "true"
@@ -192,40 +229,46 @@ class BinanceClient:
 
     # === 精度處理 ===
 
-    async def get_quantity_precision(self, symbol, notional, price):
-        """根據notional和price計算下單數量，符合交易所精度"""
+    async def get_symbol_filters(self, symbol):
+        """一次取得並快取幣種精度資訊"""
         info = await self.get_symbol_info(symbol)
         if not info:
             return None
-
-        quantity = notional / price
-
-        # 找 LOT_SIZE filter
         step_size = 0.001
+        tick_size = 0.0001
+        min_notional = 5.0
         for f in info.get("filters", []):
             if f["filterType"] == "LOT_SIZE":
                 step_size = float(f["stepSize"])
-                break
+            elif f["filterType"] == "PRICE_FILTER":
+                tick_size = float(f["tickSize"])
+            elif f["filterType"] == "MIN_NOTIONAL":
+                min_notional = float(f.get("notional", 5.0))
+        return {
+            "step_size": step_size,
+            "tick_size": tick_size,
+            "min_notional": min_notional
+        }
 
-        # 對齊精度
+    async def get_quantity_precision(self, symbol, notional, price):
+        """根據notional和price計算下單數量，符合交易所精度"""
         import math
+        filters = await self.get_symbol_filters(symbol)
+        if not filters:
+            return None
+        step_size = filters["step_size"]
+        quantity = notional / price
         precision = max(0, -int(math.log10(step_size)))
         quantity = round(quantity - (quantity % step_size), precision)
         return quantity
 
     async def get_price_precision(self, symbol, price):
         """對齊價格精度"""
-        info = await self.get_symbol_info(symbol)
-        if not info:
-            return round(price, 4)
-
-        tick_size = 0.0001
-        for f in info.get("filters", []):
-            if f["filterType"] == "PRICE_FILTER":
-                tick_size = float(f["tickSize"])
-                break
-
         import math
+        filters = await self.get_symbol_filters(symbol)
+        if not filters:
+            return round(price, 4)
+        tick_size = filters["tick_size"]
         precision = max(0, -int(math.log10(tick_size)))
         price = round(price - (price % tick_size), precision)
         return price

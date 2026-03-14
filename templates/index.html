@@ -1278,6 +1278,7 @@ async function loadSettings() {
 const CONFIG_LABELS = {
   capital_per_order_pct: ['每單資金佔比 %', '帳戶餘額的百分比'],
   leverage: ['槓桿倍數', ''],
+  tp_limit_pct: ['止盈限價單佔比 %', '限價單佔止盈總量的%，剩餘為Stop-Market單（預設50）'],
   take_profit_capital_pct: ['止盈（本金+%）', '本金增加此%時平倉（幣種累積所有倉位）'],
   pause_open_capital_pct: ['暫停開倉（本金-%）', '單幣種本金虧損此%時停止對該幣種開新倉（負數）'],
   force_close_capital_pct: ['強制平倉（本金-%）', '單幣種本金虧損此%時強制市價全平（負數）'],
@@ -1303,7 +1304,7 @@ const CONFIG_LABELS = {
 
 const CONFIG_SECTIONS = {
   '開單設定': ['capital_per_order_pct', 'leverage', 'max_orders_per_symbol', 'scale_after_order', 'scale_multiplier'],
-  '止盈止損': ['take_profit_capital_pct', 'pause_open_capital_pct', 'force_close_capital_pct'],
+  '止盈止損': ['take_profit_capital_pct', 'tp_limit_pct', 'pause_open_capital_pct', 'force_close_capital_pct'],
   '保護機制': ['margin_usage_limit_pct'],
   '網格設定': ['grid_spacing_pct', 'grid_down_count'],
   '持倉管理': ['max_symbols', 'candidate_pool_size', 'pre_scan_size', 'candidate_pool_refresh_min'],
