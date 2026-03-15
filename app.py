@@ -91,13 +91,18 @@ def calc_bollinger(klines, period=20, std_mult=2.0):
 
 
 async def scan_symbol(session, symbol, cfg=None):
-    klines, klines_1h, volume_usdt = await asyncio.gather(
+    klines, klines_1h, volume_result = await asyncio.gather(
         get_klines(session, symbol),
         get_klines_1h(session, symbol),
-        get_ticker_24h(session, symbol)
+        get_ticker_24h(session, symbol),
+        return_exceptions=True
     )
-    if not klines:
+    # 任何一個失敗都容錯處理
+    if isinstance(klines, Exception) or not klines:
         return None
+    if isinstance(klines_1h, Exception):
+        klines_1h = None
+    volume_usdt = 0 if isinstance(volume_result, Exception) else (volume_result or 0)
 
     # 成交量第一步篩選
     if cfg:
