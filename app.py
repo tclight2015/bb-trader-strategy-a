@@ -175,7 +175,12 @@ async def run_scan():
                 return
             cfg_scan = load_config()
             # 批次取所有幣種24H成交量，只需1次請求
-            volume_map = await get_all_tickers_24h(session)
+            try:
+                volume_map = await get_all_tickers_24h(session)
+                logger.info(f"批次成交量取得 {len(volume_map)} 個幣種")
+            except Exception as ve:
+                logger.error(f"批次成交量失敗: {ve}")
+                volume_map = {}
             batch_size = 20
             for i in range(0, len(symbols), batch_size):
                 batch = symbols[i:i + batch_size]
@@ -190,8 +195,13 @@ async def run_scan():
         scanner_cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         logger.error(f"掃描器錯誤: {e}", exc_info=True)
+        scanner_cache["is_scanning"] = False
+        return  # 有錯誤直接返回，不同步空結果
     finally:
         scanner_cache["is_scanning"] = False
+
+    # 掃描完成，記錄結果數量
+    logger.info(f"掃描完成，共 {len(results)} 個符合條件的幣種")
 
     # 同步給交易引擎
     from trader import state as trader_state
