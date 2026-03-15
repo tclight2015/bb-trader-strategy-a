@@ -649,6 +649,7 @@ select.filter-select {
       <option value="5000000">5M+</option>
       <option value="10000000">10M+</option>
       <option value="50000000">50M+</option>
+      <option value="100000000">100M+</option>
     </select>
     <span class="filter-label">搜尋</span>
     <input class="filter-search filter-input" id="searchInput" type="text" placeholder="BTC, ETH..." oninput="renderScanner()">
@@ -1435,6 +1436,23 @@ function showLogDetail(i, logJson) {
   document.getElementById('logDetailContent').textContent = content;
   document.getElementById('logDetailPanel').style.display = 'block';
   document.getElementById('logDetailPanel').scrollIntoView({behavior:'smooth'});
+}
+
+async function resetSystem() {
+  showModal(
+    '確認Reset系統',
+    '將取消所有開倉掛單，重新掃描持倉並掛上止盈止損單。確定嗎？',
+    async () => {
+      try {
+        const res = await fetch('/api/reset', {method: 'POST'});
+        const data = await res.json();
+        alert('Reset完成！有持倉幣種：' + (data.open_symbols || []).join(', ') || '無');
+        loadDashboard();
+      } catch(e) {
+        alert('Reset失敗：' + e.message);
+      }
+    }
+  );
 }
 
 function exportLogs() {

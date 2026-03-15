@@ -66,10 +66,15 @@ def init_db():
             price REAL NOT NULL,
             direction TEXT,  -- UP / DOWN
             order_id TEXT,
-            status TEXT DEFAULT 'PENDING',  -- PENDING / FILLED / CANCELLED
+            status TEXT DEFAULT 'DB_ONLY',  -- DB_ONLY / PLACED / FILLED / CANCELLED
             created_time TEXT
         )
     """)
+    # 相容舊資料：若 status 欄沒有 DB_ONLY 值，補上
+    try:
+        c.execute("ALTER TABLE grids ADD COLUMN placed INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
     # 日績效摘要
     c.execute("""
@@ -206,31 +211,59 @@ def close_positions(symbol, close_price, close_reason="TP"):
 # === 網格操作 ===
 
 def save_grids(symbol, grid_prices, direction="DOWN"):
+    """儲存網格到DB（DB_ONLY狀態，尚未掛出）"""
     conn = get_conn()
-    # 清除舊網格
-    conn.execute("DELETE FROM grids WHERE symbol=? AND status='PENDING'", (symbol,))
+    # 只清除 DB_ONLY 的網格（已掛出的不動，讓它隨緣成交）
+    conn.execute("DELETE FROM grids WHERE symbol=? AND status='DB_ONLY'", (symbol,))
     for price in grid_prices:
         conn.execute("""
             INSERT INTO grids (symbol, price, direction, status, created_time)
-            VALUES (?, ?, ?, 'PENDING', ?)
+            VALUES (?, ?, ?, 'DB_ONLY', ?)
         """, (symbol, price, direction, datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
 
-def get_grids(symbol):
+def get_grids(symbol, status=None):
+    """取得網格列表，status=None取全部，status='DB_ONLY'只取未掛出的"""
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM grids WHERE symbol=? AND status='PENDING' ORDER BY price DESC",
-        (symbol,)
-    ).fetchall()
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM grids WHERE symbol=? AND status=? ORDER BY price DESC",
+            (symbol, status)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM grids WHERE symbol=? AND status IN ('DB_ONLY','PLACED') ORDER BY price DESC",
+            (symbol,)
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
+def mark_grid_placed(symbol, price, order_id):
+    """標記網格已掛出"""
+    conn = get_conn()
+    conn.execute("""
+        UPDATE grids SET status='PLACED', order_id=?
+        WHERE symbol=? AND price=? AND status='DB_ONLY'
+    """, (order_id, symbol, price))
+    conn.commit()
+    conn.close()
+
+
 def clear_grids(symbol):
+    """清除所有網格（平倉時用）"""
     conn = get_conn()
     conn.execute("DELETE FROM grids WHERE symbol=?", (symbol,))
+    conn.commit()
+    conn.close()
+
+
+def clear_db_only_grids(symbol):
+    """只清除 DB_ONLY 的網格（已掛出的保留）"""
+    conn = get_conn()
+    conn.execute("DELETE FROM grids WHERE symbol=? AND status='DB_ONLY'", (symbol,))
     conn.commit()
     conn.close()
 

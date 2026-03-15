@@ -90,7 +90,7 @@ def calc_bollinger(klines, period=20, std_mult=2.0):
             "lower": lower, "std": std}
 
 
-async def scan_symbol(session, symbol):
+async def scan_symbol(session, symbol, cfg=None):
     klines, klines_1h, volume_usdt = await asyncio.gather(
         get_klines(session, symbol),
         get_klines_1h(session, symbol),
@@ -98,6 +98,13 @@ async def scan_symbol(session, symbol):
     )
     if not klines:
         return None
+
+    # 成交量第一步篩選
+    if cfg:
+        min_vol = cfg.get("min_volume_usdt", 0)
+        if min_vol > 0 and volume_usdt > 0 and volume_usdt < min_vol:
+            return None
+
     bb = calc_bollinger(klines)
     if not bb:
         return None
@@ -117,6 +124,18 @@ async def scan_symbol(session, symbol):
         if bb1h and bb1h["upper"] > 0:
             dist_1h_pct = (bb1h["upper"] - price) / bb1h["upper"] * 100
 
+    # 前高壓力評分：過去N根K棒最高點 vs 當前上軌
+    prev_high_score = 0
+    lookback = cfg.get("prev_high_lookback", 5) if cfg else 5
+    if lookback > 0 and len(klines) >= lookback + 1:
+        recent_highs = [float(k[2]) for k in klines[-(lookback+1):-1]]
+        prev_high = max(recent_highs)
+        # 前高在上軌附近（上軌的98%-105%之間）→ 有壓力，加分
+        if upper * 0.98 <= prev_high <= upper * 1.05:
+            prev_high_score = 1.0
+        elif upper * 0.95 <= prev_high <= upper * 1.10:
+            prev_high_score = 0.5
+
     return {
         "symbol": symbol.replace("USDT", ""),
         "full_symbol": symbol,
@@ -127,7 +146,8 @@ async def scan_symbol(session, symbol):
         "dist_to_upper_pct": dist_to_upper_pct,
         "dist_1h_pct": dist_1h_pct,
         "band_width_pct": band_width_pct,
-        "volume_usdt": volume_usdt,  # 新增：24H成交量
+        "volume_usdt": volume_usdt,
+        "prev_high_score": prev_high_score,
     }
 
 
@@ -139,10 +159,11 @@ async def run_scan():
             symbols = await get_all_symbols(session)
             if not symbols:
                 return
+            cfg_scan = load_config()
             batch_size = 20
             for i in range(0, len(symbols), batch_size):
                 batch = symbols[i:i + batch_size]
-                tasks = [scan_symbol(session, sym) for sym in batch]
+                tasks = [scan_symbol(session, sym, cfg_scan) for sym in batch]
                 batch_results = await asyncio.gather(*tasks, return_exceptions=True)
                 for r in batch_results:
                     if r and not isinstance(r, Exception):
@@ -165,7 +186,13 @@ async def run_scan():
 
     filtered = [r for r in results if r.get("dist_to_upper_pct", 999) <= max_dist]
     top_15m = filtered[:pre_scan_size]
-    top_15m.sort(key=lambda x: x.get("dist_1h_pct", 999) if x.get("dist_1h_pct") is not None else 999)
+    # 綜合評分排序：1H距上軌（主要）- 前高壓力加分（次要）
+    # 前高壓力score=1.0扣0.5分（排更前），score=0.5扣0.25分
+    def sort_key(x):
+        dist = x.get("dist_1h_pct", 999) if x.get("dist_1h_pct") is not None else 999
+        bonus = x.get("prev_high_score", 0) * 0.5
+        return dist - bonus
+    top_15m.sort(key=sort_key)
     final_pool = top_15m[:pool_size]
 
     trader_state["scanner_latest_result"] = [
@@ -282,6 +309,22 @@ def api_close_symbol(symbol):
     return jsonify({"status": "ok", "symbol": symbol})
 
 
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    from trader import reset_system
+    cfg = load_config()
+    client = get_client(cfg)
+
+    async def do_reset():
+        return await reset_system(client, cfg)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    result = loop.run_until_complete(do_reset())
+    loop.close()
+    return jsonify(result)
+
+
 @app.route("/api/control", methods=["POST"])
 def api_control():
     data = request.json
@@ -289,6 +332,15 @@ def api_control():
 
     if action == "pause":
         state["paused"] = True
+        cfg = load_config()
+        client = get_client(cfg)
+        from trader import handle_pause
+        async def do_pause():
+            await handle_pause(client, cfg)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(do_pause())
+        loop.close()
     elif action == "resume":
         state["paused"] = False
         state["margin_pause"] = False

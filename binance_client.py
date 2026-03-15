@@ -121,6 +121,13 @@ class BinanceClient:
         data = await self._get("/fapi/v1/ticker/price", {"symbol": symbol})
         return float(data["price"]) if "price" in data else None
 
+    async def get_all_prices(self):
+        """批次取得所有幣種現價，回傳 {symbol: price} dict"""
+        data = await self._get("/fapi/v1/ticker/price")
+        if isinstance(data, list):
+            return {item["symbol"]: float(item["price"]) for item in data if "symbol" in item}
+        return {}
+
     async def get_klines(self, symbol, interval="1m", limit=10):
         return await self._get("/fapi/v1/klines", {
             "symbol": symbol,
