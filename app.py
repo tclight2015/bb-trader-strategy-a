@@ -68,11 +68,18 @@ async def get_klines_1h(session, symbol):
     })
 
 async def get_ticker_24h(session, symbol):
-    """取得24H成交量"""
+    """取得24H成交量（單一幣種，備用）"""
     data = await fetch_json(session, f"{BINANCE_BASE}/fapi/v1/ticker/24hr", {"symbol": symbol})
     if data and "quoteVolume" in data:
         return float(data["quoteVolume"])
     return 0
+
+async def get_all_tickers_24h(session):
+    """批次取得所有幣種24H成交量，只需1次請求"""
+    data = await fetch_json(session, f"{BINANCE_BASE}/fapi/v1/ticker/24hr")
+    if not data or not isinstance(data, list):
+        return {}
+    return {item["symbol"]: float(item.get("quoteVolume", 0)) for item in data}
 
 
 def calc_bollinger(klines, period=20, std_mult=2.0):
@@ -90,7 +97,7 @@ def calc_bollinger(klines, period=20, std_mult=2.0):
             "lower": lower, "std": std}
 
 
-async def scan_symbol(session, symbol, cfg=None):
+async def scan_symbol(session, symbol, cfg=None, volume_map=None):
     try:
         klines, klines_1h = await asyncio.gather(
             get_klines(session, symbol),
@@ -102,11 +109,8 @@ async def scan_symbol(session, symbol, cfg=None):
         return None
     if isinstance(klines_1h, Exception):
         klines_1h = None
-    # 成交量獨立取，失敗不影響主流程
-    try:
-        volume_usdt = await get_ticker_24h(session, symbol) or 0
-    except Exception:
-        volume_usdt = 0
+    # 成交量從批次結果讀取，不單獨打API
+    volume_usdt = (volume_map or {}).get(symbol, 0)
 
     # 成交量第一步篩選
     if cfg:
@@ -170,10 +174,12 @@ async def run_scan():
             if not symbols:
                 return
             cfg_scan = load_config()
+            # 批次取所有幣種24H成交量，只需1次請求
+            volume_map = await get_all_tickers_24h(session)
             batch_size = 20
             for i in range(0, len(symbols), batch_size):
                 batch = symbols[i:i + batch_size]
-                tasks = [scan_symbol(session, sym, cfg_scan) for sym in batch]
+                tasks = [scan_symbol(session, sym, cfg_scan, volume_map) for sym in batch]
                 batch_results = await asyncio.gather(*tasks, return_exceptions=True)
                 for r in batch_results:
                     if r and not isinstance(r, Exception):
