@@ -215,23 +215,11 @@ def background_scanner():
         time.sleep(60)
 
 
-# ===== 帳戶資訊 =====
-
-async def get_account_info():
-    cfg = load_config()
-    client = get_client(cfg)
-    try:
-        return await client.get_balance()
-    except:
-        return None
-
+# ===== 帳戶資訊（從 trader state 快取讀取，不直接打 Binance）=====
 
 def get_account_sync():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(get_account_info())
-    loop.close()
-    return result
+    """從 trader state 的餘額快取讀取，避免儀表板刷新打 API"""
+    return state.get("balance_cache")
 
 
 # ===== Flask Routes =====
