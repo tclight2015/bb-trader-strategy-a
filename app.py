@@ -91,18 +91,22 @@ def calc_bollinger(klines, period=20, std_mult=2.0):
 
 
 async def scan_symbol(session, symbol, cfg=None):
-    klines, klines_1h, volume_result = await asyncio.gather(
-        get_klines(session, symbol),
-        get_klines_1h(session, symbol),
-        get_ticker_24h(session, symbol),
-        return_exceptions=True
-    )
-    # 任何一個失敗都容錯處理
-    if isinstance(klines, Exception) or not klines:
+    try:
+        klines, klines_1h = await asyncio.gather(
+            get_klines(session, symbol),
+            get_klines_1h(session, symbol)
+        )
+    except Exception:
+        return None
+    if not klines:
         return None
     if isinstance(klines_1h, Exception):
         klines_1h = None
-    volume_usdt = 0 if isinstance(volume_result, Exception) else (volume_result or 0)
+    # 成交量獨立取，失敗不影響主流程
+    try:
+        volume_usdt = await get_ticker_24h(session, symbol) or 0
+    except Exception:
+        volume_usdt = 0
 
     # 成交量第一步篩選
     if cfg:
@@ -119,7 +123,8 @@ async def scan_symbol(session, symbol, cfg=None):
     if price >= upper:
         return None
     band_width_pct = (upper - middle) / middle * 100
-    if band_width_pct < 1.0:
+    min_band = cfg.get("min_band_width_pct", 1.0) if cfg else 1.0
+    if band_width_pct < min_band:
         return None
     dist_to_upper_pct = (upper - price) / upper * 100
 
