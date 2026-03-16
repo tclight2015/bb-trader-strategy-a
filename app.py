@@ -323,6 +323,34 @@ def api_close_symbol(symbol):
     return jsonify({"status": "ok", "symbol": symbol})
 
 
+@app.route("/api/clear_db_positions", methods=["POST"])
+def api_clear_db_positions():
+    """清除DB中所有殘留的OPEN持倉紀錄（手動平倉後DB未同步時使用）"""
+    from database import DB_FILE, get_conn, clear_grids, write_log
+    conn = get_conn()
+    rows = conn.execute("SELECT DISTINCT symbol FROM positions WHERE status='OPEN'").fetchall()
+    symbols = [r["symbol"] for r in rows]
+    conn.execute("""
+        UPDATE positions SET status='MANUAL_CLEAR', close_time=?, close_price=0, pnl=0, close_reason='MANUAL_CLEAR'
+        WHERE status='OPEN'
+    """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
+    conn.commit()
+    conn.close()
+    for sym in symbols:
+        try:
+            clear_grids(sym)
+        except Exception:
+            pass
+    from trader import state as trader_state
+    trader_state["tp_order_ids"].clear()
+    trader_state["sl_order_ids"].clear()
+    trader_state["triggered_symbols"].clear()
+    trader_state["roe_pause_symbols"].clear()
+    trader_state["black_k_targets"].clear()
+    write_log("MANUAL_CLEAR", f"手動清除DB殘留持倉，幣種: {symbols}")
+    return jsonify({"status": "ok", "cleared_symbols": symbols})
+
+
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     from trader import reset_system

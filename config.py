@@ -23,11 +23,16 @@ DEFAULT_CONFIG = {
     "candidate_pool_size": 10,          # 候選監控池大小
     "pre_scan_size": 20,               # 先從15分K取前N個，再從中按1H取候選池
 
-    # === 止盈止損（基於本金%）===
-    "take_profit_capital_pct": 30.0,   # 止盈：本金賺X%
+    # === 止盈止損掛單（基於價格幅度%，與槓桿無關）===
+    # take_profit_price_pct: SHORT價格下跌X%止盈，1.0 = 跌1%止盈
+    # force_close_price_pct: SHORT價格上漲X%止損，3.0 = 漲3%止損
+    "take_profit_price_pct": 1.0,
+    "force_close_price_pct": 3.0,
     "tp_limit_pct": 50,                # 止盈拆單：限價單佔%（剩餘為Stop-Market）
+    # === 開倉保護（基於本金%）===
+    "take_profit_capital_pct": 30.0,   # 兼容舊key，新邏輯用 take_profit_price_pct
     "pause_open_capital_pct": -60.0,   # 暫停開新倉：本金虧X%
-    "force_close_capital_pct": -90.0,  # 強制平倉：本金虧X%
+    "force_close_capital_pct": -90.0,  # 強制平倉（ROE觸發）：本金虧X%
 
     # === 保證金水位保護 ===
     "margin_usage_limit_pct": 75.0,    # 保證金使用率上限%

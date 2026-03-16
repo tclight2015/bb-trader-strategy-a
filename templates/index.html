@@ -592,6 +592,7 @@ select.filter-select {
           <button class="btn btn-ghost" onclick="systemControl('resume')">↺ 恢復</button>
           <button class="btn btn-danger" onclick="confirmStop()">⏹ 停止系統</button>
           <button class="btn btn-primary" onclick="resetSystem()">🔄 Reset</button>
+          <button class="btn btn-warning" onclick="clearDbPositions()" style="background:#e67e22">🗑 清除DB殘留</button>
         </div>
         <div style="margin-top:10px; font-size:12px; color:var(--text3)" id="pauseInfo"></div>
       </div>
@@ -1451,6 +1452,25 @@ async function resetSystem() {
         loadDashboard();
       } catch(e) {
         alert('Reset失敗：' + e.message);
+      }
+    }
+  );
+}
+
+async function clearDbPositions() {
+  showModal(
+    '清除DB殘留持倉',
+    '將清除DB中所有 OPEN 狀態的殘留持倉（用於手動平倉後系統未同步的情況）。
+請確認幣安已無實際倉位再執行！',
+    async () => {
+      try {
+        const res = await fetch('/api/clear_db_positions', {method: 'POST'});
+        const data = await res.json();
+        const syms = (data.cleared_symbols || []).join(', ') || '無';
+        alert('清除完成！已清除幣種：' + syms);
+        loadDashboard();
+      } catch(e) {
+        alert('清除失敗：' + e.message);
       }
     }
   );
