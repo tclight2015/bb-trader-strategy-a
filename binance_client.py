@@ -205,6 +205,8 @@ class BinanceClient:
         """
         掛 Stop-Market 單（預掛，觸碰 stop_price 後自動市價執行）
         用於止盈保底：預掛在交易所，程式當機也能自動出場
+
+        注意：Binance STOP_MARKET 不支援 timeInForce 參數，已移除
         """
         params = {
             "symbol": symbol,
@@ -213,7 +215,6 @@ class BinanceClient:
             "quantity": quantity,
             "stopPrice": stop_price,
             "positionSide": "BOTH",
-            "timeInForce": "GTE_GTC",  # 有效直到取消
         }
         if reduce_only:
             params["reduceOnly"] = "true"
