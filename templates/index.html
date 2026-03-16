@@ -1460,8 +1460,7 @@ async function resetSystem() {
 async function clearDbPositions() {
   showModal(
     '清除DB殘留持倉',
-    '將清除DB中所有 OPEN 狀態的殘留持倉（用於手動平倉後系統未同步的情況）。
-請確認幣安已無實際倉位再執行！',
+    '將清除DB中所有 OPEN 狀態的殘留持倉（用於手動平倉後系統未同步的情況）。請確認幣安已無實際倉位再執行！',
     async () => {
       try {
         const res = await fetch('/api/clear_db_positions', {method: 'POST'});
