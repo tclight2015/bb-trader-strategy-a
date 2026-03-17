@@ -39,6 +39,39 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
+# 啟動時批次取得所有幣種精度快取
+FILTERS_CACHE_TTL = 3600  # 1小時更新一次
+_filters_last_refresh = 0
+
+async def refresh_all_filters(client):
+    """啟動時一次批次取得所有幣種精度，存入快取，避免頻繁打 exchangeInfo"""
+    global _filters_last_refresh
+    now = time.time()
+    if now - _filters_last_refresh < FILTERS_CACHE_TTL and state["symbol_filters_cache"]:
+        return
+    try:
+        data = await client.get_exchange_info()
+        count = 0
+        for s in data.get("symbols", []):
+            sym = s["symbol"]
+            step_size = 0.001
+            tick_size = 0.0001
+            for f in s.get("filters", []):
+                if f["filterType"] == "LOT_SIZE":
+                    step_size = float(f["stepSize"])
+                elif f["filterType"] == "PRICE_FILTER":
+                    tick_size = float(f["tickSize"])
+            state["symbol_filters_cache"][sym] = {
+                "step_size": step_size,
+                "tick_size": tick_size,
+            }
+            count += 1
+        _filters_last_refresh = now
+        logger.info(f"批次精度快取完成，共 {count} 個幣種")
+    except Exception as e:
+        logger.error(f"批次精度快取失敗: {e}")
+
+
 # ===== 全局狀態 =====
 state = {
     "running": True,
@@ -107,10 +140,21 @@ async def get_balance_cached(client):
     now = time.time()
     if state["balance_cache"] and (now - state["balance_cache_time"]) < BALANCE_CACHE_TTL:
         return state["balance_cache"]
-    balance = await client.get_balance()
+    try:
+        balance = await client.get_balance()
+    except Exception as e:
+        write_log("ERROR", f"餘額取得例外: {e}")
+        return None
     if balance:
         state["balance_cache"] = balance
         state["balance_cache_time"] = now
+    else:
+        # 直接查幣安回傳了什麼
+        try:
+            raw = await client.get_account()
+            write_log("ERROR", f"餘額取得失敗，Binance回傳: {str(raw)[:200]}")
+        except Exception as e2:
+            write_log("ERROR", f"餘額取得失敗，get_account例外: {e2}")
     return balance
 
 
@@ -681,18 +725,16 @@ async def monitor_symbol(client, cfg, symbol):
     監控單一幣種：
     1. 檢查是否有新成交 → 更新隱形網格、更新止盈止損
     2. 檢查隱形網格是否被穿越 → 真實掛出
-    3. ROE保護
+    3. ROE保護（用價格快取，不打API）
     """
     new_fills = await check_new_fills(client, symbol)
 
     if new_fills:
-        # 有新成交：重算隱形網格、更新止盈止損
         sell_fills = [f for f in new_fills if f["side"] == "SELL"]
         if sell_fills:
             latest_fill = max(sell_fills, key=lambda f: f["time"])
             update_hidden_grids(symbol, latest_fill["price"], cfg)
 
-        # 更新止盈止損（以幣安最新持倉為準）
         await place_tp_sl(client, cfg, symbol)
 
         fill_summary = [{"side": f["side"], "price": f["price"], "qty": f["qty"]}
@@ -703,8 +745,22 @@ async def monitor_symbol(client, cfg, symbol):
     # 檢查隱形網格
     await check_and_place_hidden_grids(client, cfg, symbol)
 
-    # ROE保護
-    await check_roe_protection(client, cfg, symbol)
+    # ROE保護（用快取持倉，不打額外API）
+    cached_pos = state.get("_binance_positions_cache", {}).get(symbol)
+    if cached_pos:
+        current_price = get_cached_price(symbol)
+        if current_price:
+            avg_entry = cached_pos["avg_entry"]
+            total_qty = cached_pos["qty"]
+            margin = cached_pos["initial_margin"]
+            if margin > 0:
+                unrealized_pnl = (avg_entry - current_price) * total_qty
+                roe_pct = unrealized_pnl / margin * 100
+                capital_return_pct = roe_pct / cfg["leverage"]
+                if capital_return_pct <= cfg["force_close_capital_pct"]:
+                    write_log("ROE_FORCE", f"本金虧損{capital_return_pct:.1f}%，強制平倉",
+                              symbol=symbol)
+                    await close_symbol(client, cfg, symbol, reason="FORCE_CLOSE")
 
 
 # ===== 掃描候選池 =====
@@ -800,6 +856,7 @@ async def handle_pause(client, cfg):
 
 async def trading_loop():
     logger.info("🚀 交易引擎啟動")
+    loop_count = 0
 
     while True:
         try:
@@ -810,13 +867,22 @@ async def trading_loop():
                 continue
 
             client = get_client(cfg)
+            loop_count += 1
 
-            # 批次取價
+            # 批次取價（每輪）
             await refresh_price_cache(client)
 
-            # 取得幣安實際持倉
+            # 批次精度快取（啟動時 + 每小時）
+            await refresh_all_filters(client)
+
+            # 取得幣安實際持倉（每輪一次，結果共用）
             all_positions = await get_all_binance_positions(client)
             open_syms = set(all_positions.keys())
+            # 存入state供儀表板讀取
+            state["_binance_positions_cache"] = all_positions
+
+            # 餘額（每輪從快取讀，快取30秒更新一次）
+            balance = await get_balance_cached(client)
 
             # 1. 監控現有持倉（新成交、隱形網格、ROE）
             for symbol in list(open_syms):
@@ -838,6 +904,9 @@ async def trading_loop():
 
             # 3. 候選池開倉監控
             if not state["paused"] and not state["margin_pause"]:
+                # 每輪重新取持倉數，確保準確
+                current_open_count = len(open_syms)
+
                 for candidate in state["candidate_pool"]:
                     sym = candidate["symbol"]
                     current_price = get_cached_price(sym)
@@ -845,21 +914,23 @@ async def trading_loop():
                         continue
 
                     upper = candidate["upper_15m"]
-
-                    # 持倉數檢查（以幣安為準）
                     already_has_position = sym in open_syms
-                    at_max = not already_has_position and len(open_syms) >= cfg["max_symbols"]
 
-                    # 觸碰上軌開倉（往下方向）
+                    # 持倉數檢查：用即時計數，開倉成功後立刻更新
+                    at_max = not already_has_position and current_open_count >= cfg["max_symbols"]
+
+                    # 觸碰上軌開倉
                     if current_price >= upper * 0.9995:
                         if sym not in state["triggered_symbols"]:
                             write_log("TRIGGER", f"觸碰上軌 price={current_price} upper={upper}",
                                       symbol=sym)
                             state["triggered_symbols"].add(sym)
                             if not at_max:
-                                await try_open_position(client, cfg, sym, upper, "UPPER")
+                                success = await try_open_position(client, cfg, sym, upper, "UPPER")
+                                if success:
+                                    current_open_count += 1  # 立刻更新計數
                             else:
-                                write_log("BLOCKED", "持倉已滿，觸碰上軌但被擋", symbol=sym)
+                                write_log("BLOCKED", f"持倉已滿({current_open_count}/{cfg['max_symbols']})", symbol=sym)
 
                     # 離開上軌解鎖
                     if current_price < upper * 0.998 and sym in state["triggered_symbols"]:
@@ -872,20 +943,20 @@ async def trading_loop():
                             target = await check_black_k(client, sym)
                             if target:
                                 state["black_k_targets"][sym] = target
-                                write_log("BLACK_K_TARGET", f"黑K目標設定={target}", symbol=sym)
 
                     # 黑K目標觸價
                     if sym in state["black_k_targets"]:
                         target_price = state["black_k_targets"][sym]
                         if current_price >= target_price * 0.9995:
-                            logger.info(f"🖤 黑K觸價 {sym} @ {current_price}")
+                            at_max = not already_has_position and current_open_count >= cfg["max_symbols"]
                             if not at_max:
                                 success = await try_open_position(client, cfg, sym, target_price, "BLACK_K")
                                 if success:
+                                    current_open_count += 1
                                     state["black_k_targets"].pop(sym, None)
                                     state["black_k_last_k_time"].pop(sym, None)
                             else:
-                                write_log("BLOCKED", "持倉已滿，黑K觸價但被擋", symbol=sym)
+                                write_log("BLOCKED", f"持倉已滿({current_open_count}/{cfg['max_symbols']})", symbol=sym)
 
         except Exception as e:
             logger.error(f"主循環錯誤: {e}", exc_info=True)
