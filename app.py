@@ -223,7 +223,7 @@ def background_scanner():
     while True:
         if not scanner_cache["is_scanning"]:
             run_scan_sync()
-        time.sleep(60)
+        time.sleep(180)  # 3分鐘掃一次，避免API限速
 
 
 def get_account_sync():
