@@ -895,9 +895,7 @@ async function loadAccount() {
 
     // Pause info
     let pauseInfo = '';
-    if (data.roe_pause_symbols && data.roe_pause_symbols.length > 0) {
-      pauseInfo = '⚠️ ROE暫停開倉：' + data.roe_pause_symbols.join(', ');
-    }
+
     document.getElementById('pauseInfo').textContent = pauseInfo;
 
     // Candidate pool
@@ -930,12 +928,14 @@ async function loadPositions() {
     }
 
     wrap.innerHTML = symbols.map(sym => {
-      const positions = bySymbol[sym] || [];
-      const totalMargin = positions.reduce((s, p) => s + (p.margin || 0), 0);
-      const totalNotional = positions.reduce((s, p) => s + (p.notional || 0), 0);
-      const avgEntry = positions.length > 0
-        ? positions.reduce((s, p) => s + p.entry_price * p.quantity, 0) /
-          positions.reduce((s, p) => s + p.quantity, 0) : 0;
+      const pos = bySymbol[sym] || {};
+      const avgEntry = pos.avg_entry || 0;
+      const qty = pos.qty || 0;
+      const margin = pos.initial_margin || 0;
+      const unrealizedPnl = pos.unrealized_pnl || 0;
+      const hiddenGrids = pos.hidden_grids || [];
+      const tpSl = pos.tp_sl_orders || {};
+      const pnlColor = unrealizedPnl >= 0 ? 'var(--success)' : 'var(--danger)';
 
       return `
         <div class="position-card">
@@ -943,7 +943,6 @@ async function loadPositions() {
             <div style="display:flex;align-items:center;gap:8px">
               <div class="position-sym">${sym.replace('USDT','')}</div>
               <span class="badge badge-short">SHORT</span>
-              <span class="badge">${positions.length} 筆</span>
             </div>
             <button class="btn btn-danger btn-xs" onclick="confirmClose('${sym}')">強制平倉</button>
           </div>
@@ -954,20 +953,17 @@ async function loadPositions() {
                 <div class="pos-stat-value">${fmt(avgEntry)}</div>
               </div>
               <div class="pos-stat">
-                <div class="pos-stat-label">總保證金</div>
-                <div class="pos-stat-value">${fmtUSDT(totalMargin)} USDT</div>
+                <div class="pos-stat-label">保證金</div>
+                <div class="pos-stat-value">${fmtUSDT(margin)} USDT</div>
               </div>
               <div class="pos-stat">
-                <div class="pos-stat-label">合約總值</div>
-                <div class="pos-stat-value">${fmtUSDT(totalNotional)} USDT</div>
+                <div class="pos-stat-label">浮動損益</div>
+                <div class="pos-stat-value" style="color:${pnlColor}">${unrealizedPnl >= 0 ? '+' : ''}${fmtUSDT(unrealizedPnl)} USDT</div>
               </div>
             </div>
             <div class="orders-list">
-              <div class="orders-list-title">各筆開倉</div>
-              ${positions.map((p, i) => `
-                <div class="order-row">
-                  <span>#${i+1} 入場 ${fmt(p.entry_price)}</span>
-                  <span>數量 ${p.quantity}</span>
+              <div class="orders-list-title">持倉數量：${qty} ｜ 隱形網格：${hiddenGrids.length} 個</div>
+              ${hiddenGrids.length > 0 ? `<div class="order-row" style="color:var(--text3)">隱形網格：${hiddenGrids.map(p => fmt(p)).join(' / ')}</div>` : ''}
                   <span>${fmtTime(p.open_time)}</span>
                 </div>
               `).join('')}
@@ -1014,12 +1010,25 @@ async function addCapitalLog() {
 
 // ===== SYSTEM CONTROLS =====
 async function systemControl(action) {
-  await fetch('/api/control', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({action})
-  });
-  await loadAccount();
+  try {
+    const res = await fetch('/api/control', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({action})
+    });
+    const data = await res.json();
+    const labels = {start:'✅ 系統已啟動', stop:'⏹ 系統已停止', pause:'⏸ 已暫停開倉', resume:'▶ 已恢復運行'};
+    const msg = labels[action] || '操作完成';
+    // 顯示短暫提示
+    const toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:20px;right:20px;background:#333;color:#fff;padding:10px 18px;border-radius:8px;z-index:9999;font-size:14px;';
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2000);
+    await loadAccount();
+  } catch(e) {
+    alert('操作失敗：' + e.message);
+  }
 }
 
 function confirmStop() {
@@ -1282,7 +1291,8 @@ const CONFIG_LABELS = {
   capital_per_order_pct: ['每單資金佔比 %', '帳戶餘額的百分比'],
   leverage: ['槓桿倍數', ''],
   tp_limit_pct: ['止盈限價單佔比 %', '限價單佔止盈總量的%，剩餘為Stop-Market單（預設50）'],
-  take_profit_capital_pct: ['止盈（本金+%）', '本金增加此%時平倉（幣種累積所有倉位）'],
+  take_profit_price_pct: ['止盈（價格跌%）', 'SHORT價格下跌此%止盈，1.0=跌1%'],
+  force_close_price_pct: ['止損（價格漲%）', 'SHORT價格上漲此%止損，3.0=漲3%'],
   pause_open_capital_pct: ['暫停開倉（本金-%）', '單幣種本金虧損此%時停止對該幣種開新倉（負數）'],
   force_close_capital_pct: ['強制平倉（本金-%）', '單幣種本金虧損此%時強制市價全平（負數）'],
   margin_usage_limit_pct: ['保證金使用率上限 %', '超過此值停止開新倉'],
@@ -1307,7 +1317,7 @@ const CONFIG_LABELS = {
 
 const CONFIG_SECTIONS = {
   '開單設定': ['capital_per_order_pct', 'leverage', 'max_orders_per_symbol', 'scale_after_order', 'scale_multiplier'],
-  '止盈止損': ['take_profit_capital_pct', 'tp_limit_pct', 'pause_open_capital_pct', 'force_close_capital_pct'],
+  '止盈止損': ['take_profit_price_pct', 'force_close_price_pct', 'tp_limit_pct', 'pause_open_capital_pct', 'force_close_capital_pct'],
   '保護機制': ['margin_usage_limit_pct'],
   '網格設定': ['grid_spacing_pct', 'grid_down_count'],
   '持倉管理': ['max_symbols', 'candidate_pool_size', 'pre_scan_size', 'candidate_pool_refresh_min'],
@@ -1476,14 +1486,8 @@ async function clearDbPositions() {
 }
 
 function exportLogs() {
-  const logs = window._currentLogs || [];
-  if (logs.length === 0) { alert('無日誌可匯出'); return; }
-  const lines = logs.map(l => {
-    const d = l.detail ? JSON.parse(l.detail) : {};
-    return `[${l.time}] ${l.event_type} ${l.symbol||''}: ${l.note} | ${JSON.stringify(d)}`;
-  }).join('\n');
-  const text = `BB Grid Trader 日誌 (${logs.length}筆)\n${'='.repeat(60)}\n${lines}`;
-  navigator.clipboard.writeText(text).then(() => alert(`已複製 ${logs.length} 筆日誌到剪貼板！\n直接貼給Claude分析即可。`));
+  const limit = 200;
+  window.location.href = `/api/logs/export?limit=${limit}`;
 }
 
 // ===== INIT =====
@@ -1515,7 +1519,7 @@ startAutoRefresh();
     <span class="filter-label">幣種</span>
     <input class="filter-input" id="logSymbolFilter" type="text" placeholder="BTCUSDT" style="width:100px">
     <button class="btn btn-ghost btn-sm" onclick="loadLogs()">篩選</button>
-    <button class="btn btn-primary btn-sm" onclick="exportLogs()">📋 複製給Claude分析</button>
+    <button class="btn btn-primary btn-sm" onclick="exportLogs()">📥 下載日誌(JSON)</button>
   </div>
 
   <div class="card">

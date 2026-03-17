@@ -6,14 +6,13 @@ import math
 import os
 import threading
 import logging
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, Response
 from datetime import datetime
 from config import load_config, save_config, get_notional
 from database import (
-    init_db, get_open_positions, get_open_symbols,
-    get_trade_history, get_daily_pnl, get_cumulative_pnl,
-    add_capital_log, get_capital_log, close_positions, clear_grids,
-    get_logs, get_log_summary
+    init_db, get_trade_history, get_daily_pnl, get_cumulative_pnl,
+    add_capital_log, get_capital_log,
+    get_logs, get_log_summary, write_log, export_logs_json
 )
 from trader import state, start_trading_loop, close_symbol, get_client
 
@@ -21,7 +20,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
 BINANCE_BASE = "https://fapi.binance.com"
 
 # ===== Scanner Cache =====
@@ -36,7 +34,7 @@ async def fetch_json(session, url, params=None):
     try:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
             return await r.json()
-    except:
+    except Exception:
         return None
 
 
@@ -62,20 +60,14 @@ async def get_klines(session, symbol):
         "symbol": symbol, "interval": "15m", "limit": 25
     })
 
+
 async def get_klines_1h(session, symbol):
     return await fetch_json(session, f"{BINANCE_BASE}/fapi/v1/klines", {
         "symbol": symbol, "interval": "1h", "limit": 25
     })
 
-async def get_ticker_24h(session, symbol):
-    """取得24H成交量（單一幣種，備用）"""
-    data = await fetch_json(session, f"{BINANCE_BASE}/fapi/v1/ticker/24hr", {"symbol": symbol})
-    if data and "quoteVolume" in data:
-        return float(data["quoteVolume"])
-    return 0
 
 async def get_all_tickers_24h(session):
-    """批次取得所有幣種24H成交量，只需1次請求"""
     data = await fetch_json(session, f"{BINANCE_BASE}/fapi/v1/ticker/24hr")
     if not data or not isinstance(data, list):
         return {}
@@ -92,8 +84,7 @@ def calc_bollinger(klines, period=20, std_mult=2.0):
     std = math.sqrt(variance)
     upper = mean + std_mult * std
     lower = mean - std_mult * std
-    current_price = closes[-1]
-    return {"price": current_price, "upper": upper, "middle": mean,
+    return {"price": closes[-1], "upper": upper, "middle": mean,
             "lower": lower, "std": std}
 
 
@@ -107,12 +98,8 @@ async def scan_symbol(session, symbol, cfg=None, volume_map=None):
         return None
     if not klines:
         return None
-    if isinstance(klines_1h, Exception):
-        klines_1h = None
-    # 成交量從批次結果讀取，不單獨打API
-    volume_usdt = (volume_map or {}).get(symbol, 0)
 
-    # 成交量第一步篩選
+    volume_usdt = (volume_map or {}).get(symbol, 0)
     if cfg:
         min_vol = cfg.get("min_volume_usdt", 0)
         if min_vol > 0 and volume_usdt > 0 and volume_usdt < min_vol:
@@ -126,25 +113,26 @@ async def scan_symbol(session, symbol, cfg=None, volume_map=None):
     middle = bb["middle"]
     if price >= upper:
         return None
+
     band_width_pct = (upper - middle) / middle * 100
     min_band = cfg.get("min_band_width_pct", 1.0) if cfg else 1.0
     if band_width_pct < min_band:
         return None
+
     dist_to_upper_pct = (upper - price) / upper * 100
 
     dist_1h_pct = None
-    if klines_1h:
+    if klines_1h and not isinstance(klines_1h, Exception):
         bb1h = calc_bollinger(klines_1h)
         if bb1h and bb1h["upper"] > 0:
             dist_1h_pct = (bb1h["upper"] - price) / bb1h["upper"] * 100
 
-    # 前高壓力評分：過去N根K棒最高點 vs 當前上軌
+    # 前高壓力評分
     prev_high_score = 0
     lookback = cfg.get("prev_high_lookback", 5) if cfg else 5
     if lookback > 0 and len(klines) >= lookback + 1:
-        recent_highs = [float(k[2]) for k in klines[-(lookback+1):-1]]
+        recent_highs = [float(k[2]) for k in klines[-(lookback + 1):-1]]
         prev_high = max(recent_highs)
-        # 前高在上軌附近（上軌的98%-105%之間）→ 有壓力，加分
         if upper * 0.98 <= prev_high <= upper * 1.05:
             prev_high_score = 1.0
         elif upper * 0.95 <= prev_high <= upper * 1.10:
@@ -174,13 +162,11 @@ async def run_scan():
             if not symbols:
                 return
             cfg_scan = load_config()
-            # 批次取所有幣種24H成交量，只需1次請求
             try:
                 volume_map = await get_all_tickers_24h(session)
-                logger.info(f"批次成交量取得 {len(volume_map)} 個幣種")
-            except Exception as ve:
-                logger.error(f"批次成交量失敗: {ve}")
+            except Exception:
                 volume_map = {}
+
             batch_size = 20
             for i in range(0, len(symbols), batch_size):
                 batch = symbols[i:i + batch_size]
@@ -190,20 +176,19 @@ async def run_scan():
                     if r and not isinstance(r, Exception):
                         results.append(r)
                 await asyncio.sleep(0.15)
+
         results.sort(key=lambda x: x["dist_to_upper_pct"])
         scanner_cache["data"] = results
         scanner_cache["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         logger.error(f"掃描器錯誤: {e}", exc_info=True)
-        scanner_cache["is_scanning"] = False
-        return  # 有錯誤直接返回，不同步空結果
+        return
     finally:
         scanner_cache["is_scanning"] = False
 
-    # 掃描完成，記錄結果數量
     logger.info(f"掃描完成，共 {len(results)} 個符合條件的幣種")
 
-    # 同步給交易引擎
+    # 同步給交易引擎（候選池）
     from trader import state as trader_state
     cfg = load_config()
     max_dist = cfg.get("max_dist_to_upper_pct", 1.0)
@@ -212,12 +197,12 @@ async def run_scan():
 
     filtered = [r for r in results if r.get("dist_to_upper_pct", 999) <= max_dist]
     top_15m = filtered[:pre_scan_size]
-    # 綜合評分排序：1H距上軌（主要）- 前高壓力加分（次要）
-    # 前高壓力score=1.0扣0.5分（排更前），score=0.5扣0.25分
+
     def sort_key(x):
-        dist = x.get("dist_1h_pct", 999) if x.get("dist_1h_pct") is not None else 999
+        dist = x.get("dist_1h_pct") if x.get("dist_1h_pct") is not None else 999
         bonus = x.get("prev_high_score", 0) * 0.5
         return dist - bonus
+
     top_15m.sort(key=sort_key)
     final_pool = top_15m[:pool_size]
 
@@ -241,11 +226,17 @@ def background_scanner():
         time.sleep(60)
 
 
-# ===== 帳戶資訊（從 trader state 快取讀取，不直接打 Binance）=====
-
 def get_account_sync():
-    """從 trader state 的餘額快取讀取，避免儀表板刷新打 API"""
     return state.get("balance_cache")
+
+
+# ===== 從幣安同步取得持倉（給儀表板用）=====
+
+def get_binance_positions_sync():
+    """同步方式取得幣安持倉（從price_cache推算，實際持倉從trader state）"""
+    # trader的monitor_symbol會更新known_fills和hidden_grids
+    # 儀表板直接顯示trader state裡的資訊
+    return state.get("_binance_positions_cache", {})
 
 
 # ===== Flask Routes =====
@@ -286,26 +277,44 @@ def api_account():
         balance["margin_ratio"] = round(margin_ratio, 2)
         balance["notional_per_order"] = round(notional_per_order, 2)
         balance["margin_limit_pct"] = cfg["margin_usage_limit_pct"]
+
     return jsonify({
         "balance": balance,
         "system_running": cfg.get("system_running", True),
         "paused": state["paused"],
         "margin_pause": state["margin_pause"],
-        "roe_pause_symbols": list(state["roe_pause_symbols"]),
         "candidate_pool": state["candidate_pool"],
     })
 
 
 @app.route("/api/positions")
 def api_positions():
-    positions = get_open_positions()
-    by_symbol = {}
-    for p in positions:
-        sym = p["symbol"]
-        if sym not in by_symbol:
-            by_symbol[sym] = []
-        by_symbol[sym].append(p)
-    return jsonify({"positions": by_symbol, "symbols": list(by_symbol.keys())})
+    """從幣安實際持倉取資料（透過trader的快取）"""
+    cfg = load_config()
+    client = get_client(cfg)
+
+    async def do_get():
+        from trader import get_all_binance_positions
+        return await get_all_binance_positions(client)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        positions = loop.run_until_complete(do_get())
+    except Exception:
+        positions = {}
+    finally:
+        loop.close()
+
+    # 附加隱形網格資訊
+    result = {}
+    for sym, pos in positions.items():
+        result[sym] = {
+            **pos,
+            "hidden_grids": state["hidden_grids"].get(sym, []),
+            "tp_sl_orders": state["tp_sl_orders"].get(sym, {}),
+        }
+    return jsonify({"positions": result, "symbols": list(result.keys())})
 
 
 @app.route("/api/close/<symbol>", methods=["POST"])
@@ -321,34 +330,6 @@ def api_close_symbol(symbol):
     loop.run_until_complete(do_close())
     loop.close()
     return jsonify({"status": "ok", "symbol": symbol})
-
-
-@app.route("/api/clear_db_positions", methods=["POST"])
-def api_clear_db_positions():
-    """清除DB中所有殘留的OPEN持倉紀錄（手動平倉後DB未同步時使用）"""
-    from database import DB_FILE, get_conn, clear_grids, write_log
-    conn = get_conn()
-    rows = conn.execute("SELECT DISTINCT symbol FROM positions WHERE status='OPEN'").fetchall()
-    symbols = [r["symbol"] for r in rows]
-    conn.execute("""
-        UPDATE positions SET status='MANUAL_CLEAR', close_time=?, close_price=0, pnl=0, close_reason='MANUAL_CLEAR'
-        WHERE status='OPEN'
-    """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
-    conn.commit()
-    conn.close()
-    for sym in symbols:
-        try:
-            clear_grids(sym)
-        except Exception:
-            pass
-    from trader import state as trader_state
-    trader_state["tp_order_ids"].clear()
-    trader_state["sl_order_ids"].clear()
-    trader_state["triggered_symbols"].clear()
-    trader_state["roe_pause_symbols"].clear()
-    trader_state["black_k_targets"].clear()
-    write_log("MANUAL_CLEAR", f"手動清除DB殘留持倉，幣種: {symbols}")
-    return jsonify({"status": "ok", "cleared_symbols": symbols})
 
 
 @app.route("/api/reset", methods=["POST"])
@@ -371,10 +352,10 @@ def api_reset():
 def api_control():
     data = request.json
     action = data.get("action")
+    cfg = load_config()
 
     if action == "pause":
         state["paused"] = True
-        cfg = load_config()
         client = get_client(cfg)
         from trader import handle_pause
         async def do_pause():
@@ -383,19 +364,29 @@ def api_control():
         asyncio.set_event_loop(loop)
         loop.run_until_complete(do_pause())
         loop.close()
+        write_log("PAUSE", "系統暫停")
+        return jsonify({"status": "ok", "action": action, "system_running": True, "paused": True})
+
     elif action == "resume":
         state["paused"] = False
         state["margin_pause"] = False
+        write_log("RESUME", "系統恢復")
+        return jsonify({"status": "ok", "action": action, "system_running": True, "paused": False})
+
     elif action == "stop":
-        cfg = load_config()
         cfg["system_running"] = False
         save_config(cfg)
+        write_log("STOP", "系統停止")
+        return jsonify({"status": "ok", "action": action, "system_running": False, "paused": False})
+
     elif action == "start":
-        cfg = load_config()
         cfg["system_running"] = True
         save_config(cfg)
+        state["paused"] = False
+        write_log("START", "系統啟動")
+        return jsonify({"status": "ok", "action": action, "system_running": True, "paused": False})
 
-    return jsonify({"status": "ok", "action": action})
+    return jsonify({"status": "error", "message": "unknown action"})
 
 
 @app.route("/api/config", methods=["GET"])
@@ -412,14 +403,12 @@ def api_config_set():
     data = request.json
     allowed_keys = [
         "capital_per_order_pct", "leverage", "grid_spacing_pct",
-        "grid_down_count", "max_symbols",
-        "candidate_pool_size", "take_profit_capital_pct",
-        "tp_limit_pct",                          # 新增：止盈拆單比例
+        "max_symbols", "candidate_pool_size", "pre_scan_size",
+        "take_profit_price_pct", "force_close_price_pct",
+        "tp_limit_pct",
         "pause_open_capital_pct", "force_close_capital_pct",
-        "margin_usage_limit_pct", "min_volume_usdt", "candidate_pool_refresh_min",
-        "max_orders_per_symbol", "scale_after_order", "scale_multiplier",
-        "pre_scan_size",
-        "volume_shrink_lookback", "volume_shrink_threshold",
+        "margin_usage_limit_pct", "min_volume_usdt",
+        "candidate_pool_refresh_min",
         "max_dist_to_upper_pct", "max_dist_1h_upper_pct",
         "min_band_width_pct", "prev_high_lookback",
         "volume_spike_multiplier", "single_candle_max_rise_pct",
@@ -473,9 +462,23 @@ def api_logs():
     limit = int(request.args.get("limit", 200))
     return jsonify(get_logs(event_type, symbol, limit))
 
+
 @app.route("/api/logs/summary")
 def api_logs_summary():
     return jsonify(get_log_summary())
+
+
+@app.route("/api/logs/export")
+def api_logs_export():
+    """下載最近200筆日誌為JSON檔，供分析用"""
+    limit = int(request.args.get("limit", 200))
+    json_str = export_logs_json(limit=limit)
+    filename = f"bb_grid_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    return Response(
+        json_str,
+        mimetype="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 
 init_db()

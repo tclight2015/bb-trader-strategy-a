@@ -1,26 +1,27 @@
 """
-交易引擎 — 策略A
+交易引擎 — 策略A v2
 
-網格邏輯：
-- 開倉後網格只存DB（DB_ONLY），不立刻掛出
-- 每輪掃描：價格跌破DB網格 → 掛出等反彈觸碰成交
-- 新成交後：以新成交價重建DB網格（只蓋DB_ONLY，已掛出PLACED不動）
-- 已掛出未成交的單隨緣成交，不取消
+核心原則：一切以幣安為準，DB只記已平倉歷史
 
-往上邏輯（策略A）：
-- 等黑K出現，取3根最高點掛限價空單
-- 現價上方的DB網格不掛，等黑K決定
+開倉邏輯：
+- 候選池所有幣持續嘗試開倉，被持倉數濾網擋住
+- 現價觸碰15分K BB上軌 → 掛限價空單
+- 現價突破上軌 → 等黑K收完 → 取含黑K的3根最高點掛空單
+- 確認幣安成交後才算正式開倉
+
+隱形網格：
+- 開倉成交後，以成交價計算4個向下網格存入state（不掛幣安）
+- 每輪掃描：現價穿越隱形網格 → 真實掛出 + 從state移除
+- 有新成交（任何一筆）→ 重算4格取代舊隱形網格
+- 已掛出的網格單隨緣成交，不取消
 
 止盈止損：
-- 每次開倉後動態重算，預掛限價單+Stop-Market單各一張
-- 平倉後全部取消
+- 以幣安實際持倉計算，每次有新成交後重新掛
+- SHORT止盈：入場均價 × (1 - take_profit_price_pct%)
+- SHORT止損：入場均價 × (1 + force_close_price_pct%)
+- 掛單前驗證價格方向正確
 
 保證金模式：全倉（CROSSED）
-
-止盈止損邏輯說明：
-- take_profit_price_pct：價格下跌X%即止盈（例：1.0 = 價格跌1%）
-- force_close_price_pct：價格上漲X%即止損（例：3.0 = 價格漲3%）
-- 與槓桿無關，直接用價格幅度判斷
 """
 
 import asyncio
@@ -28,14 +29,10 @@ import time
 import math
 import logging
 from datetime import datetime, timezone, timedelta
+
 TZ_TAIPEI = timezone(timedelta(hours=8))
 from binance_client import BinanceClient
-from database import (
-    write_log,
-    add_position, get_open_positions, get_open_symbols,
-    close_positions, save_grids, get_grids, clear_grids,
-    clear_db_only_grids, mark_grid_placed
-)
+from database import write_log, record_trade_close, add_trade_analytics
 from config import load_config, get_notional
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -48,38 +45,51 @@ state = {
     "paused": False,
     "last_pool_scan": 0,
     "margin_pause": False,
-    "roe_pause_symbols": set(),
     "candidate_pool": [],
-    "tp_order_ids": {},          # symbol -> {"limit": id, "stop": id}
-    "sl_order_ids": {},          # symbol -> {"limit": id, "stop": id}
-    "triggered_symbols": set(),
-    "black_k_targets": {},       # symbol -> target_price
-    "black_k_last_k_time": {},   # symbol -> k棒時間戳，防重複觸發
-    "margin_type_set": set(),    # 已設定全倉的幣種，避免重複呼叫
-    "last_scan_result": [],
     "scanner_latest_result": [],
+
+    # 止盈止損單ID（symbol -> {"tp_limit": id, "tp_stop": id, "sl_limit": id, "sl_stop": id}）
+    "tp_sl_orders": {},
+
+    # 黑K偵測狀態
+    "black_k_targets": {},       # symbol -> target_price
+    "black_k_last_k_time": {},   # symbol -> 上一根K棒開盤時間，防重複
+
+    # 隱形網格（symbol -> [price1, price2, ...]，最多4個，以幣安成交價為基準）
+    "hidden_grids": {},
+
+    # 已知成交單ID，避免重複處理（symbol -> set of order_ids）
+    "known_fills": {},
+
+    # 幣種設定快取（symbol -> {margin_set, leverage_set}）
+    "symbol_setup_done": set(),
+
+    # 幣種精度快取
+    "symbol_filters_cache": {},
+
     # 批次取價快取
-    "price_cache": {},           # symbol -> price
+    "price_cache": {},
     "price_cache_time": 0,
+
     # 餘額快取
     "balance_cache": None,
     "balance_cache_time": 0,
-    # 幣種精度快取（避免每次掛單都打 exchangeInfo）
-    "symbol_filters_cache": {},  # symbol -> {step_size, tick_size, min_notional}
+
+    # 觸發防重複（symbol -> bool）
+    "triggered_symbols": set(),
 }
 
-PRICE_CACHE_TTL = 10    # 秒，批次取價快取有效時間
-BALANCE_CACHE_TTL = 30  # 秒，餘額快取有效時間
+PRICE_CACHE_TTL = 10
+BALANCE_CACHE_TTL = 30
 
 
 def get_client(cfg):
     return BinanceClient(cfg["api_key"], cfg["api_secret"], cfg["testnet"])
 
 
-# ===== 批次取價快取 =====
+# ===== 快取工具 =====
 
 async def refresh_price_cache(client):
-    """批次取得所有幣種現價，存入快取"""
     try:
         prices = await client.get_all_prices()
         if prices:
@@ -90,14 +100,10 @@ async def refresh_price_cache(client):
 
 
 def get_cached_price(symbol):
-    """從快取讀取現價"""
     return state["price_cache"].get(symbol)
 
 
-# ===== 餘額快取 =====
-
 async def get_balance_cached(client):
-    """餘額快取，30秒更新一次"""
     now = time.time()
     if state["balance_cache"] and (now - state["balance_cache_time"]) < BALANCE_CACHE_TTL:
         return state["balance_cache"]
@@ -108,53 +114,608 @@ async def get_balance_cached(client):
     return balance
 
 
-# ===== 幣種精度快取 =====
-
-async def get_symbol_filters_cached(client, symbol):
-    """
-    幣種精度快取，只在第一次打 API，之後從記憶體讀取
-    避免每次掛單都打 exchangeInfo（原本每個網格都打一次）
-    """
+async def get_filters_cached(client, symbol):
     if symbol in state["symbol_filters_cache"]:
         return state["symbol_filters_cache"][symbol]
-    filters = await client.get_symbol_filters(symbol)
-    if filters:
-        state["symbol_filters_cache"][symbol] = filters
-    return filters
+    try:
+        filters = await client.get_symbol_filters(symbol)
+        if filters:
+            state["symbol_filters_cache"][symbol] = filters
+        return filters
+    except Exception as e:
+        logger.error(f"取得精度失敗 {symbol}: {e}")
+        return None
 
 
 def align_price(price, tick_size):
-    """對齊價格精度（不打API）"""
-    if tick_size <= 0:
+    if not tick_size or tick_size <= 0:
         return round(price, 8)
     precision = max(0, -int(math.log10(tick_size)))
     return round(price - (price % tick_size), precision)
 
 
-def align_quantity(quantity, step_size):
-    """對齊數量精度（不打API）"""
-    if step_size <= 0:
-        return round(quantity, 8)
+def align_qty(qty, step_size):
+    if not step_size or step_size <= 0:
+        return round(qty, 8)
     precision = max(0, -int(math.log10(step_size)))
-    return round(quantity - (quantity % step_size), precision)
+    return round(qty - (qty % step_size), precision)
 
 
-# ===== 掃描邏輯 =====
+# ===== 幣種初始化（全倉+槓桿，每個幣只做一次）=====
+
+async def ensure_symbol_setup(client, cfg, symbol):
+    if symbol in state["symbol_setup_done"]:
+        return True
+    try:
+        await client.set_margin_type(symbol, "CROSSED")
+        await client.set_leverage(symbol, cfg["leverage"])
+        state["symbol_setup_done"].add(symbol)
+        return True
+    except Exception as e:
+        logger.error(f"幣種初始化失敗 {symbol}: {e}")
+        return False
+
+
+# ===== 從幣安取得實際持倉 =====
+
+async def get_binance_position(client, symbol):
+    """從幣安取得單一幣種實際持倉，回傳 {qty, avg_entry, unrealized_pnl} 或 None"""
+    try:
+        positions = await client.get_positions(symbol)
+        if not positions:
+            return None
+        p = positions[0]
+        qty = abs(float(p["positionAmt"]))
+        if qty <= 0:
+            return None
+        return {
+            "qty": qty,
+            "avg_entry": float(p["entryPrice"]),
+            "unrealized_pnl": float(p["unRealizedProfit"]),
+            "initial_margin": float(p["initialMargin"]),
+            "leverage": int(float(p.get("leverage", 1))),
+        }
+    except Exception as e:
+        logger.error(f"取得幣安持倉失敗 {symbol}: {e}")
+        return None
+
+
+async def get_all_binance_positions(client):
+    """取得所有有持倉的幣種"""
+    try:
+        positions = await client.get_positions()
+        return {p["symbol"]: {
+            "qty": abs(float(p["positionAmt"])),
+            "avg_entry": float(p["entryPrice"]),
+            "unrealized_pnl": float(p["unRealizedProfit"]),
+            "initial_margin": float(p["initialMargin"]),
+        } for p in positions if abs(float(p["positionAmt"])) > 0}
+    except Exception as e:
+        logger.error(f"取得所有持倉失敗: {e}")
+        return {}
+
+
+# ===== 成交確認 =====
+
+async def get_recent_fills(client, symbol, limit=10):
+    """取得最近成交紀錄，回傳 [{order_id, price, qty, side, time}]"""
+    try:
+        trades = await client._get("/fapi/v1/userTrades", {
+            "symbol": symbol,
+            "limit": limit
+        }, signed=True)
+        if not isinstance(trades, list):
+            return []
+        return [{
+            "order_id": str(t["orderId"]),
+            "price": float(t["price"]),
+            "qty": float(t["qty"]),
+            "side": t["side"],
+            "time": t["time"],
+            "realized_pnl": float(t.get("realizedPnl", 0)),
+        } for t in trades]
+    except Exception as e:
+        logger.error(f"取得成交紀錄失敗 {symbol}: {e}")
+        return []
+
+
+async def check_new_fills(client, symbol):
+    """
+    檢查是否有新成交，回傳新成交列表
+    用來觸發：隱形網格重算、止盈止損更新
+    """
+    fills = await get_recent_fills(client, symbol, limit=5)
+    if not fills:
+        return []
+
+    known = state["known_fills"].setdefault(symbol, set())
+    new_fills = [f for f in fills if f["order_id"] not in known]
+
+    for f in new_fills:
+        known.add(f["order_id"])
+
+    return new_fills
+
+
+# ===== 隱形網格 =====
+
+def calc_hidden_grids(entry_price, grid_spacing_pct, count=4):
+    """計算隱形網格價格列表（往下）"""
+    return [round(entry_price * (1 - grid_spacing_pct / 100 * i), 8)
+            for i in range(1, count + 1)]
+
+
+def update_hidden_grids(symbol, entry_price, cfg):
+    """以新成交價重算4格隱形網格，取代舊的"""
+    grids = calc_hidden_grids(entry_price, cfg["grid_spacing_pct"], 4)
+    state["hidden_grids"][symbol] = grids
+    logger.info(f"隱形網格更新 {symbol}: {grids}")
+    write_log("HIDDEN_GRID_UPDATE", f"隱形網格重算，基準價={entry_price}", symbol=symbol,
+              detail={"entry_price": entry_price, "grids": grids})
+
+
+async def check_and_place_hidden_grids(client, cfg, symbol):
+    """
+    檢查隱形網格是否被穿越，穿越就真實掛出並從state移除
+    已掛出的不取消，隨緣成交
+    """
+    grids = state["hidden_grids"].get(symbol, [])
+    if not grids:
+        return
+
+    current_price = get_cached_price(symbol)
+    if not current_price:
+        return
+
+    filters = await get_filters_cached(client, symbol)
+    if not filters:
+        return
+
+    balance = await get_balance_cached(client)
+    if not balance:
+        return
+
+    notional = get_notional(cfg, balance["total"])
+    remaining = []
+
+    for grid_price in grids:
+        if current_price < grid_price:
+            # 現價已穿越此隱形網格，真實掛出
+            qty = align_qty(notional / grid_price, filters["step_size"])
+            aligned_price = align_price(grid_price, filters["tick_size"])
+
+            if qty <= 0:
+                continue
+
+            result = await client.place_limit_order(symbol, "SELL", qty, aligned_price)
+            if result and "orderId" in result:
+                logger.info(f"📌 隱形網格掛出 {symbol} @ {aligned_price}")
+                write_log("GRID_PLACE", f"隱形網格掛出 @ {aligned_price}", symbol=symbol,
+                          detail={"price": aligned_price, "qty": qty,
+                                  "current_price": current_price,
+                                  "order_id": str(result["orderId"])})
+                # 從隱形列表移除（不加入remaining）
+            else:
+                # 掛單失敗，保留在隱形列表稍後重試
+                remaining.append(grid_price)
+                write_log("ERROR", f"隱形網格掛單失敗 @ {aligned_price}", symbol=symbol,
+                          detail={"resp": result})
+        else:
+            remaining.append(grid_price)
+
+    state["hidden_grids"][symbol] = remaining
+
+
+# ===== 止盈止損 =====
+
+def calc_tp_price(avg_entry, cfg):
+    """SHORT止盈：價格下跌 take_profit_price_pct%"""
+    pct = cfg.get("take_profit_price_pct", 1.0)
+    return avg_entry * (1 - pct / 100)
+
+
+def calc_sl_price(avg_entry, cfg):
+    """SHORT止損：價格上漲 force_close_price_pct%"""
+    pct = cfg.get("force_close_price_pct", 3.0)
+    return avg_entry * (1 + pct / 100)
+
+
+async def place_tp_sl(client, cfg, symbol):
+    """
+    從幣安取實際持倉，計算並掛止盈止損單
+    掛單前驗證價格方向（止盈必須低於入場價，止損必須高於入場價）
+    """
+    pos = await get_binance_position(client, symbol)
+    if not pos:
+        write_log("TP_SL", "幣安無持倉，跳過止盈止損", symbol=symbol)
+        return
+
+    avg_entry = pos["avg_entry"]
+    total_qty = pos["qty"]
+
+    tp_price_raw = calc_tp_price(avg_entry, cfg)
+    sl_price_raw = calc_sl_price(avg_entry, cfg)
+
+    # 方向驗證
+    if tp_price_raw >= avg_entry:
+        write_log("ERROR", f"止盈價{tp_price_raw}>=入場價{avg_entry}，放棄掛止盈", symbol=symbol)
+        return
+    if sl_price_raw <= avg_entry:
+        write_log("ERROR", f"止損價{sl_price_raw}<=入場價{avg_entry}，放棄掛止損", symbol=symbol)
+        return
+
+    filters = await get_filters_cached(client, symbol)
+    if not filters:
+        return
+
+    tp_price = align_price(tp_price_raw, filters["tick_size"])
+    sl_price = align_price(sl_price_raw, filters["tick_size"])
+
+    # 取消舊止盈止損單
+    old = state["tp_sl_orders"].get(symbol, {})
+    for order_id in old.values():
+        try:
+            await client.cancel_order(symbol, order_id)
+        except Exception:
+            pass
+    state["tp_sl_orders"][symbol] = {}
+
+    # 拆單計算
+    tp_limit_pct = cfg.get("tp_limit_pct", 50)
+    limit_qty = align_qty(total_qty * (tp_limit_pct / 100), filters["step_size"])
+    stop_qty = align_qty(total_qty - limit_qty, filters["step_size"])
+
+    new_orders = {}
+    tp_pct = round((avg_entry - tp_price) / avg_entry * 100, 3)
+    sl_pct = round((sl_price - avg_entry) / avg_entry * 100, 3)
+
+    # 止盈限價單
+    if limit_qty > 0:
+        r = await client.place_limit_order(symbol, "BUY", limit_qty, tp_price, reduce_only=False)
+        if "orderId" in r:
+            new_orders["tp_limit"] = str(r["orderId"])
+            logger.info(f"✅ 止盈限價 {symbol} @ {tp_price} (-{tp_pct}%)")
+        else:
+            write_log("ERROR", f"止盈限價單失敗: {r.get('msg','')}", symbol=symbol,
+                      detail={"tp_price": tp_price, "qty": limit_qty, "resp": r})
+
+    # 止盈Stop-Market單
+    if stop_qty > 0:
+        r = await client.place_stop_market_order(symbol, "BUY", stop_qty, tp_price, reduce_only=False)
+        if "orderId" in r:
+            new_orders["tp_stop"] = str(r["orderId"])
+            logger.info(f"✅ 止盈Stop {symbol} @ {tp_price}")
+        else:
+            write_log("ERROR", f"止盈Stop單失敗: {r.get('msg','')}", symbol=symbol,
+                      detail={"tp_price": tp_price, "qty": stop_qty, "resp": r})
+
+    # 止損限價單
+    if limit_qty > 0:
+        r = await client.place_limit_order(symbol, "BUY", limit_qty, sl_price, reduce_only=False)
+        if "orderId" in r:
+            new_orders["sl_limit"] = str(r["orderId"])
+            logger.info(f"✅ 止損限價 {symbol} @ {sl_price} (+{sl_pct}%)")
+        else:
+            write_log("ERROR", f"止損限價單失敗: {r.get('msg','')}", symbol=symbol,
+                      detail={"sl_price": sl_price, "qty": limit_qty, "resp": r})
+
+    # 止損Stop-Market單
+    if stop_qty > 0:
+        r = await client.place_stop_market_order(symbol, "BUY", stop_qty, sl_price, reduce_only=False)
+        if "orderId" in r:
+            new_orders["sl_stop"] = str(r["orderId"])
+            logger.info(f"✅ 止損Stop {symbol} @ {sl_price}")
+        else:
+            write_log("ERROR", f"止損Stop單失敗: {r.get('msg','')}", symbol=symbol,
+                      detail={"sl_price": sl_price, "qty": stop_qty, "resp": r})
+
+    state["tp_sl_orders"][symbol] = new_orders
+
+    write_log("TP_SL_ORDER",
+              f"止盈止損更新 avg={avg_entry:.6f} tp={tp_price}(-{tp_pct}%) sl={sl_price}(+{sl_pct}%)",
+              symbol=symbol, detail={
+                  "avg_entry": avg_entry,
+                  "tp_price": tp_price, "sl_price": sl_price,
+                  "tp_pct": tp_pct, "sl_pct": sl_pct,
+                  "total_qty": total_qty,
+                  "limit_qty": limit_qty, "stop_qty": stop_qty,
+                  "orders": new_orders
+              })
+
+
+# ===== 開倉邏輯 =====
+
+async def try_open_position(client, cfg, symbol, entry_price, trigger_type="UPPER"):
+    """
+    掛限價空單，不記DB，等幣安成交確認
+    trigger_type: UPPER（觸碰上軌）或 BLACK_K（黑K目標）
+    """
+    if state["paused"] or state["margin_pause"]:
+        return False
+
+    # 檢查持倉數（以幣安為準）
+    all_positions = await get_all_binance_positions(client)
+    open_syms = set(all_positions.keys())
+
+    if symbol not in open_syms and len(open_syms) >= cfg["max_symbols"]:
+        return False
+
+    balance = await get_balance_cached(client)
+    if not balance:
+        write_log("ERROR", "餘額取得失敗", symbol=symbol)
+        return False
+
+    total = balance["total"]
+    margin_used = balance["margin_used"]
+    if total > 0 and (margin_used / total * 100) >= cfg["margin_usage_limit_pct"]:
+        state["margin_pause"] = True
+        write_log("MARGIN_PAUSE", f"保證金使用率超限，暫停開倉", symbol=symbol)
+        return False
+
+    # 幣種初始化
+    await ensure_symbol_setup(client, cfg, symbol)
+
+    filters = await get_filters_cached(client, symbol)
+    if not filters:
+        write_log("ERROR", "無法取得幣種精度", symbol=symbol)
+        return False
+
+    notional = get_notional(cfg, total)
+    qty = align_qty(notional / entry_price, filters["step_size"])
+    price = align_price(entry_price, filters["tick_size"])
+
+    if qty <= 0:
+        return False
+
+    result = await client.place_limit_order(symbol, "SELL", qty, price)
+    if "orderId" not in result:
+        write_log("ERROR", f"下單失敗: {result.get('msg','')}", symbol=symbol,
+                  detail={"price": price, "qty": qty, "resp": result})
+        return False
+
+    order_id = str(result["orderId"])
+    logger.info(f"✅ 掛單 {symbol} @ {price} qty={qty} trigger={trigger_type}")
+
+    # 取得候選池市場資訊供log用
+    candidate_info = next((c for c in state["candidate_pool"] if c["symbol"] == symbol), {})
+    write_log("ORDER", f"掛限價空單 @ {price} [{trigger_type}]", symbol=symbol,
+              detail={
+                  "order_id": order_id,
+                  "price": price,
+                  "qty": qty,
+                  "notional": notional,
+                  "trigger_type": trigger_type,
+                  "account_balance": total,
+                  "market_snapshot": {
+                      "upper_15m": candidate_info.get("upper_15m", 0),
+                      "dist_15m_pct": candidate_info.get("dist_15m", 0),
+                      "dist_1h_pct": candidate_info.get("dist_1h", 0),
+                      "band_width_pct": candidate_info.get("band_width_pct", 0),
+                      "volume_usdt": candidate_info.get("volume_usdt", 0),
+                      "prev_high_score": candidate_info.get("prev_high_score", 0),
+                  }
+              })
+    return True
+
+
+# ===== 平倉邏輯 =====
+
+async def close_symbol(client, cfg, symbol, reason="TP"):
+    """市價平倉，取消所有掛單，清除state，記錄歷史"""
+    logger.info(f"平倉 {symbol} reason={reason}")
+
+    pos = await get_binance_position(client, symbol)
+    actual_close_price = None
+
+    if pos:
+        total_qty = pos["qty"]
+        avg_entry = pos["avg_entry"]
+
+        result = await client.place_market_order(symbol, "BUY", total_qty, reduce_only=False)
+        logger.info(f"市價平倉 {symbol}: {result}")
+
+        # 取實際成交均價
+        if result and "avgPrice" in result:
+            try:
+                actual_close_price = float(result["avgPrice"])
+            except Exception:
+                pass
+
+        if not actual_close_price or actual_close_price <= 0:
+            await asyncio.sleep(0.5)
+            actual_close_price = await client.get_price(symbol) or avg_entry
+
+        pnl = (avg_entry - actual_close_price) * total_qty
+        margin = pos["initial_margin"]
+        roe_pct = (pnl / margin * 100) if margin > 0 else 0
+        price_drop_pct = (avg_entry - actual_close_price) / avg_entry * 100
+
+        logger.info(f"💰 {symbol} PnL={pnl:.4f} ROE={roe_pct:.2f}%")
+
+        # 記錄歷史（DB只記已平倉）
+        record_trade_close(
+            symbol=symbol,
+            avg_entry=avg_entry,
+            close_price=actual_close_price,
+            total_qty=total_qty,
+            total_margin=margin,
+            total_pnl=pnl,
+            roe_pct=roe_pct,
+            close_reason=reason
+        )
+
+        write_log("CLOSE", f"平倉完成 PnL={pnl:.4f} ROE={roe_pct:.2f}%",
+                  symbol=symbol, detail={
+                      "avg_entry": avg_entry,
+                      "close_price": actual_close_price,
+                      "price_drop_pct": round(price_drop_pct, 3),
+                      "total_pnl": round(pnl, 4),
+                      "roe_pct": round(roe_pct, 2),
+                      "reason": reason
+                  })
+
+        # 記錄 trade_analytics（為未來學習系統準備）
+        try:
+            candidate_info = next((c for c in state["candidate_pool"] if c["symbol"] == symbol), {})
+            add_trade_analytics(
+                symbol=symbol,
+                avg_entry=avg_entry,
+                close_price=actual_close_price,
+                total_qty=total_qty,
+                total_margin=margin,
+                total_pnl=pnl,
+                roe_pct=roe_pct,
+                close_reason=reason,
+                market_snapshot=candidate_info
+            )
+        except Exception as e:
+            logger.error(f"trade_analytics記錄失敗: {e}")
+
+    # 取消所有掛單
+    try:
+        await client.cancel_all_orders(symbol)
+    except Exception as e:
+        logger.error(f"取消掛單失敗 {symbol}: {e}")
+
+    # 清除state
+    _clear_symbol_state(symbol)
+
+
+def _clear_symbol_state(symbol):
+    state["tp_sl_orders"].pop(symbol, None)
+    state["black_k_targets"].pop(symbol, None)
+    state["black_k_last_k_time"].pop(symbol, None)
+    state["hidden_grids"].pop(symbol, None)
+    state["known_fills"].pop(symbol, None)
+    state["triggered_symbols"].discard(symbol)
+    state["margin_pause"] = False
+
+
+# ===== 黑K偵測 =====
+
+async def check_black_k(client, symbol):
+    """
+    等1分K收完確認是黑K，取含該K在內往前3根的最高點
+    K棒未收完繼續觀察，不提前行動
+    """
+    try:
+        klines = await client.get_klines(symbol, "1m", limit=10)
+    except Exception:
+        return None
+
+    if not klines or len(klines) < 4:
+        return None
+
+    # klines[-1] 是當前未收完的K，klines[-2] 是上一根已收完的K
+    last_k = klines[-2]
+    k_open_time = last_k[0]
+    open_p = float(last_k[1])
+    high_p = float(last_k[2])
+    close_p = float(last_k[4])
+    volume = float(last_k[5])
+
+    # 防重複：同一根K棒只處理一次
+    if state["black_k_last_k_time"].get(symbol) == k_open_time:
+        return None
+
+    # 不是黑K就跳過
+    if close_p >= open_p:
+        return None
+
+    state["black_k_last_k_time"][symbol] = k_open_time
+
+    # 取含黑K在內往前3根的最高點
+    three_ks = klines[-4:-1]  # 包含黑K這根
+    highest = max(float(k[2]) for k in three_ks)
+
+    body_pct = round((open_p - close_p) / open_p * 100, 3)
+    upper_shadow = round((high_p - open_p) / open_p * 100, 3) if high_p > open_p else 0
+
+    logger.info(f"🖤 黑K {symbol} body={body_pct}% 目標={highest}")
+    write_log("BLACK_K", f"黑K確認，目標={highest}", symbol=symbol,
+              detail={
+                  "open": open_p, "close": close_p, "high": high_p,
+                  "body_pct": body_pct,
+                  "upper_shadow_pct": upper_shadow,
+                  "volume": volume,
+                  "highest": highest,
+                  "k_open_time": k_open_time
+              })
+    return highest
+
+
+# ===== ROE保護（以幣安持倉為準）=====
+
+async def check_roe_protection(client, cfg, symbol):
+    """檢查浮動損益，觸發暫停或強制平倉"""
+    pos = await get_binance_position(client, symbol)
+    if not pos:
+        return
+
+    avg_entry = pos["avg_entry"]
+    current_price = get_cached_price(symbol)
+    if not current_price:
+        return
+
+    total_qty = pos["qty"]
+    # 用實際保證金計算，從幣安取
+    margin = pos["initial_margin"]
+    if margin <= 0:
+        return
+
+    unrealized_pnl = (avg_entry - current_price) * total_qty
+    roe_pct = unrealized_pnl / margin * 100
+    capital_return_pct = roe_pct / cfg["leverage"]
+
+    if capital_return_pct <= cfg["force_close_capital_pct"]:
+        write_log("ROE_FORCE", f"本金虧損{capital_return_pct:.1f}%，強制平倉", symbol=symbol,
+                  detail={"avg_entry": avg_entry, "current_price": current_price,
+                          "unrealized_pnl": round(unrealized_pnl, 4)})
+        await close_symbol(client, cfg, symbol, reason="FORCE_CLOSE")
+
+
+# ===== 持倉監控（新成交處理）=====
+
+async def monitor_symbol(client, cfg, symbol):
+    """
+    監控單一幣種：
+    1. 檢查是否有新成交 → 更新隱形網格、更新止盈止損
+    2. 檢查隱形網格是否被穿越 → 真實掛出
+    3. ROE保護
+    """
+    new_fills = await check_new_fills(client, symbol)
+
+    if new_fills:
+        # 有新成交：重算隱形網格、更新止盈止損
+        sell_fills = [f for f in new_fills if f["side"] == "SELL"]
+        if sell_fills:
+            latest_fill = max(sell_fills, key=lambda f: f["time"])
+            update_hidden_grids(symbol, latest_fill["price"], cfg)
+
+        # 更新止盈止損（以幣安最新持倉為準）
+        await place_tp_sl(client, cfg, symbol)
+
+        fill_summary = [{"side": f["side"], "price": f["price"], "qty": f["qty"]}
+                        for f in new_fills]
+        write_log("FILL", f"新成交 {len(new_fills)}筆", symbol=symbol,
+                  detail={"fills": fill_summary})
+
+    # 檢查隱形網格
+    await check_and_place_hidden_grids(client, cfg, symbol)
+
+    # ROE保護
+    await check_roe_protection(client, cfg, symbol)
+
+
+# ===== 掃描候選池 =====
 
 async def scan_candidates(cfg, scanner_data=None):
-    """候選池從掃描器結果建立，加入成交量篩選和前高壓力評分"""
     if not scanner_data:
-        write_log("SCAN", "掃描器資料為空，跳過本次候選池更新")
         return []
 
     candidates = []
     for item in scanner_data:
         try:
-            volume = float(item.get("volume_usdt", 0))
-            min_vol = cfg.get("min_volume_usdt", 0)
-            if min_vol > 0 and volume > 0 and volume < min_vol:
-                continue
-
             sym = item.get("full_symbol", "")
             if not sym:
                 raw = item.get("symbol", "")
@@ -167,591 +728,68 @@ async def scan_candidates(cfg, scanner_data=None):
                 "dist_15m": float(item.get("dist_to_upper", item.get("dist_to_upper_pct", 0))),
                 "dist_1h": float(item.get("dist_1h_pct", 0)) if item.get("dist_1h_pct") is not None else 0,
                 "band_width_pct": float(item.get("band_width_pct", 0)),
-                "volume_usdt": volume,
+                "volume_usdt": float(item.get("volume_usdt", 0)),
                 "prev_high_score": float(item.get("prev_high_score", 0)),
             })
         except Exception:
             continue
 
-    write_log("SCAN", f"候選池更新，共 {len(candidates)} 個候選",
+    write_log("SCAN", f"候選池更新 {len(candidates)} 個",
               detail={"from_scanner": len(scanner_data), "candidates": len(candidates)})
     return candidates
 
 
-# ===== 網格計算 =====
-
-def calc_grid_prices(base_price, grid_spacing_pct, count):
-    """計算往下網格價格列表"""
-    prices = []
-    for i in range(1, count + 1):
-        p = base_price * (1 - grid_spacing_pct / 100 * i)
-        prices.append(round(p, 8))
-    return prices
-
-
-# ===== 止盈止損價格計算 =====
-# 新邏輯：直接用價格幅度%，與槓桿無關
-# take_profit_price_pct = 1.0 → 價格跌1%止盈
-# force_close_price_pct = 3.0 → 價格漲3%止損
-
-def calc_tp_price(avg_entry, cfg):
-    """
-    SHORT止盈價：價格下跌 take_profit_price_pct% 即止盈
-    config key: take_profit_price_pct（新）
-    向後兼容：若無此key，從舊的 take_profit_capital_pct / leverage 換算
-    """
-    if "take_profit_price_pct" in cfg:
-        pct = cfg["take_profit_price_pct"]
-    else:
-        # 舊邏輯換算：本金% / leverage = 價格%
-        pct = cfg["take_profit_capital_pct"] / cfg["leverage"]
-    return avg_entry * (1 - pct / 100)
-
-
-def calc_sl_price(avg_entry, cfg):
-    """
-    SHORT止損價：價格上漲 force_close_price_pct% 即止損
-    config key: force_close_price_pct（新）
-    向後兼容：若無此key，從舊的 force_close_capital_pct / leverage 換算
-    """
-    if "force_close_price_pct" in cfg:
-        pct = cfg["force_close_price_pct"]
-    else:
-        pct = abs(cfg["force_close_capital_pct"]) / cfg["leverage"]
-    return avg_entry * (1 + pct / 100)
-
-
-# ===== 止盈止損掛單管理 =====
-
-async def place_tp_sl_orders(client, cfg, symbol):
-    """
-    重新計算止盈止損價，取消舊單，掛新的4張：
-    - 止盈限價單（tp_limit_pct%）
-    - 止盈Stop-Market單（剩餘%）
-    - 止損限價單（tp_limit_pct%）
-    - 止損Stop-Market單（剩餘%）
-
-    修正：改用DB持倉計算，不依賴Binance即時回傳
-    （因為掛限價單後立即呼叫get_positions可能還未成交）
-    """
-    # 從DB取持倉（不打API，避免限價單剛掛還未成交的問題）
-    db_positions = get_open_positions(symbol)
-    if not db_positions:
-        write_log("TP_SL_ORDER", "DB無持倉，跳過止盈止損掛單", symbol=symbol)
-        return
-
-    total_qty = sum(p["quantity"] for p in db_positions)
-    if total_qty <= 0:
-        return
-
-    avg_entry = sum(p["entry_price"] * p["quantity"] for p in db_positions) / total_qty
-
-    tp_price_raw = calc_tp_price(avg_entry, cfg)
-    sl_price_raw = calc_sl_price(avg_entry, cfg)
-
-    # 使用快取精度對齊，不打 exchangeInfo API
-    filters = await get_symbol_filters_cached(client, symbol)
-    if not filters:
-        write_log("ERROR", "無法取得幣種精度，止盈止損掛單失敗", symbol=symbol)
-        return
-
-    tick_size = filters["tick_size"]
-    step_size = filters["step_size"]
-    tp_price = align_price(tp_price_raw, tick_size)
-    sl_price = align_price(sl_price_raw, tick_size)
-
-    # 取消舊止盈止損單
-    for order_dict_key in ["tp_order_ids", "sl_order_ids"]:
-        old_ids = state[order_dict_key].get(symbol, {})
-        for order_id in old_ids.values():
-            try:
-                await client.cancel_order(symbol, order_id)
-            except Exception:
-                pass
-    state["tp_order_ids"][symbol] = {}
-    state["sl_order_ids"][symbol] = {}
-
-    # 計算拆單數量
-    tp_limit_pct = cfg.get("tp_limit_pct", 50)
-    precision = max(0, -int(math.log10(step_size))) if step_size > 0 else 3
-
-    limit_qty = align_quantity(total_qty * (tp_limit_pct / 100), step_size)
-    stop_qty = align_quantity(total_qty - limit_qty, step_size)
-
-    new_tp = {}
-    new_sl = {}
-
-    # 止盈限價單
-    if limit_qty > 0:
-        r = await client.place_limit_order(symbol, "BUY", limit_qty, tp_price, reduce_only=True)
-        if "orderId" in r:
-            new_tp["limit"] = str(r["orderId"])
-            logger.info(f"✅ 止盈限價 {symbol} @ {tp_price} qty={limit_qty}")
-        else:
-            write_log("ERROR", f"止盈限價單失敗: {r.get('msg','')}", symbol=symbol,
-                      detail={"tp_price": tp_price, "qty": limit_qty, "resp": r})
-
-    # 止盈Stop-Market單（去掉 timeInForce，Binance STOP_MARKET不支援GTE_GTC）
-    if stop_qty > 0:
-        r = await client.place_stop_market_order(symbol, "BUY", stop_qty, tp_price, reduce_only=True)
-        if "orderId" in r:
-            new_tp["stop"] = str(r["orderId"])
-            logger.info(f"✅ 止盈Stop {symbol} @ {tp_price} qty={stop_qty}")
-        else:
-            write_log("ERROR", f"止盈Stop單失敗: {r.get('msg','')}", symbol=symbol,
-                      detail={"tp_price": tp_price, "qty": stop_qty, "resp": r})
-
-    # 止損限價單
-    if limit_qty > 0:
-        r = await client.place_limit_order(symbol, "BUY", limit_qty, sl_price, reduce_only=True)
-        if "orderId" in r:
-            new_sl["limit"] = str(r["orderId"])
-            logger.info(f"✅ 止損限價 {symbol} @ {sl_price} qty={limit_qty}")
-        else:
-            write_log("ERROR", f"止損限價單失敗: {r.get('msg','')}", symbol=symbol,
-                      detail={"sl_price": sl_price, "qty": limit_qty, "resp": r})
-
-    # 止損Stop-Market單
-    if stop_qty > 0:
-        r = await client.place_stop_market_order(symbol, "BUY", stop_qty, sl_price, reduce_only=True)
-        if "orderId" in r:
-            new_sl["stop"] = str(r["orderId"])
-            logger.info(f"✅ 止損Stop {symbol} @ {sl_price} qty={stop_qty}")
-        else:
-            write_log("ERROR", f"止損Stop單失敗: {r.get('msg','')}", symbol=symbol,
-                      detail={"sl_price": sl_price, "qty": stop_qty, "resp": r})
-
-    state["tp_order_ids"][symbol] = new_tp
-    state["sl_order_ids"][symbol] = new_sl
-
-    # 計算實際價格跌幅%，供log參考
-    tp_pct = (avg_entry - tp_price) / avg_entry * 100
-    sl_pct = (sl_price - avg_entry) / avg_entry * 100
-
-    write_log("TP_SL_ORDER", f"止盈止損更新 avg={avg_entry:.6f} tp={tp_price}(-{tp_pct:.2f}%) sl={sl_price}(+{sl_pct:.2f}%)",
-              symbol=symbol, detail={
-                  "avg_entry": round(avg_entry, 8),
-                  "tp_price": tp_price, "sl_price": sl_price,
-                  "tp_drop_pct": round(tp_pct, 3),
-                  "sl_rise_pct": round(sl_pct, 3),
-                  "total_qty": total_qty,
-                  "limit_qty": limit_qty, "stop_qty": stop_qty,
-                  "tp_orders": new_tp, "sl_orders": new_sl,
-                  "position_count": len(db_positions)
-              })
-
-
-# ===== 開倉邏輯 =====
-
-async def try_open_position(client, cfg, symbol, entry_price, grid_level=0):
-    """嘗試開空倉（掛限價單），開倉後更新止盈止損掛單和DB網格"""
-    if state["paused"] or state["margin_pause"]:
-        return False
-    if symbol in state["roe_pause_symbols"]:
-        return False
-
-    open_syms = get_open_symbols()
-    if symbol not in open_syms and len(open_syms) >= cfg["max_symbols"]:
-        return False
-
-    existing = get_open_positions(symbol)
-    if len(existing) >= cfg.get("max_orders_per_symbol", 20):
-        return False
-
-    balance = await get_balance_cached(client)
-    if not balance:
-        write_log("ERROR", "帳戶餘額取得失敗", symbol=symbol)
-        return False
-
-    total = balance["total"]
-    margin_used = balance["margin_used"]
-    if total > 0:
-        margin_ratio = (margin_used / total) * 100
-        if margin_ratio >= cfg["margin_usage_limit_pct"]:
-            state["margin_pause"] = True
-            logger.warning(f"保證金使用率 {margin_ratio:.1f}% 超過上限")
-            return False
-
-    # 設定全倉模式（每個幣種只設一次）
-    if symbol not in state["margin_type_set"]:
-        await client.set_margin_type(symbol, "CROSSED")
-        state["margin_type_set"].add(symbol)
-    await client.set_leverage(symbol, cfg["leverage"])
-
-    # 取得精度（快取）
-    filters = await get_symbol_filters_cached(client, symbol)
-    if not filters:
-        write_log("ERROR", "無法取得幣種精度，跳過開倉", symbol=symbol)
-        return False
-
-    # 計算下單數量
-    base_notional = get_notional(cfg, total)
-    existing_count = len(existing)
-    scale_after = cfg.get("scale_after_order", 10)
-    scale_mult = cfg.get("scale_multiplier", 1.5)
-    notional = base_notional * scale_mult if existing_count >= scale_after else base_notional
-
-    quantity = notional / entry_price
-    quantity = align_quantity(quantity, filters["step_size"])
-    if not quantity or quantity <= 0:
-        return False
-
-    price = align_price(entry_price, filters["tick_size"])
-    margin = notional / cfg["leverage"]
-
-    result = await client.place_limit_order(symbol, "SELL", quantity, price)
-    if "orderId" not in result:
-        write_log("ERROR", f"下單失敗: {result.get('msg','unknown')}", symbol=symbol,
-                  detail={"entry_price": entry_price, "error": result})
-        return False
-
-    order_id = str(result["orderId"])
-    logger.info(f"✅ 掛單成功 {symbol} @ {price} qty={quantity} level={grid_level}")
-
-    # Log：加入市場狀態快照，為未來學習系統準備
-    candidate_info = next((c for c in state["candidate_pool"] if c["symbol"] == symbol), {})
-    write_log("ORDER", f"掛限價空單 @ {price}", symbol=symbol,
-              detail={
-                  "order_id": order_id,
-                  "price": price,
-                  "quantity": quantity,
-                  "notional": notional,
-                  "margin": margin,
-                  "grid_level": grid_level,
-                  "account_balance": total,
-                  # 市場狀態快照
-                  "market_snapshot": {
-                      "upper_15m": candidate_info.get("upper_15m", 0),
-                      "dist_15m_pct": candidate_info.get("dist_15m", 0),
-                      "dist_1h_pct": candidate_info.get("dist_1h", 0),
-                      "band_width_pct": candidate_info.get("band_width_pct", 0),
-                      "volume_usdt": candidate_info.get("volume_usdt", 0),
-                      "prev_high_score": candidate_info.get("prev_high_score", 0),
-                  }
-              })
-
-    add_position(symbol, order_id, price, quantity, notional, margin, cfg["leverage"], grid_level)
-
-    # 以新成交價重建DB網格（只蓋DB_ONLY，PLACED不動）
-    grid_prices = calc_grid_prices(price, cfg["grid_spacing_pct"], cfg["grid_down_count"])
-    save_grids(symbol, grid_prices)
-    logger.info(f"DB網格更新 {symbol}: {grid_prices}")
-
-    # 更新止盈止損掛單
-    await place_tp_sl_orders(client, cfg, symbol)
-
-    # 強制更新餘額快取
-    state["balance_cache_time"] = 0
-
-    return True
-
-
-# ===== 平倉邏輯 =====
-
-async def close_symbol(client, cfg, symbol, reason="TP"):
-    """
-    平倉：先市價平倉，取得實際成交均價後寫入DB，再取消所有掛單
-
-    修正：平倉後查詢 Binance 成交紀錄取得實際成交均價
-    避免用「下單前現價」導致 PnL 計算不準
-    """
-    logger.info(f"平倉 {symbol} reason={reason}")
-
-    positions = await client.get_positions(symbol)
-    if not positions:
-        # 交易所無持倉，但DB可能有殘留，直接清理
-        _clear_symbol_state(symbol)
-        return
-
-    total_qty = abs(sum(float(p["positionAmt"]) for p in positions))
-    if total_qty <= 0:
-        _clear_symbol_state(symbol)
-        return
-
-    # 市價平倉前先記錄現價備用
-    pre_close_price = await client.get_price(symbol)
-
-    result = await client.place_market_order(symbol, "BUY", total_qty, reduce_only=True)
-    logger.info(f"市價平倉 {symbol}: {result}")
-
-    # 取得實際成交均價
-    # 嘗試從市價單回傳取avgPrice，若無則用Binance最新成交查詢
-    actual_close_price = None
-    if result and "avgPrice" in result:
-        try:
-            actual_close_price = float(result["avgPrice"])
-        except Exception:
-            pass
-
-    if not actual_close_price or actual_close_price <= 0:
-        # fallback：用平倉後的現價（比平倉前現價更準確）
-        post_price = await client.get_price(symbol)
-        actual_close_price = post_price or pre_close_price or 0
-
-    close_result = close_positions(symbol, actual_close_price, reason)
-    if close_result:
-        logger.info(f"💰 {symbol} PnL={close_result['total_pnl']:.4f} ROE={close_result['roe_pct']:.2f}%")
-        write_log("TP" if reason == "TP" else "FORCE_CLOSE",
-                  f"平倉完成 PnL={close_result['total_pnl']:.4f} ROE={close_result['roe_pct']:.2f}%",
-                  symbol=symbol,
-                  detail={
-                      "avg_entry": close_result["avg_entry"],
-                      "close_price": actual_close_price,
-                      "total_pnl": close_result["total_pnl"],
-                      "roe_pct": close_result["roe_pct"],
-                      "position_count": close_result["position_count"],
-                      "reason": reason,
-                      "price_drop_pct": round(
-                          (close_result["avg_entry"] - actual_close_price) / close_result["avg_entry"] * 100, 3
-                      ) if close_result["avg_entry"] > 0 else 0
-                  })
-
-    # 取消所有掛單（含止盈止損、網格單）
-    await client.cancel_all_orders(symbol)
-
-    # 清除所有狀態
-    _clear_symbol_state(symbol)
-
-
-def _clear_symbol_state(symbol):
-    """清除幣種所有狀態"""
-    clear_grids(symbol)
-    state["tp_order_ids"].pop(symbol, None)
-    state["sl_order_ids"].pop(symbol, None)
-    state["black_k_targets"].pop(symbol, None)
-    state["black_k_last_k_time"].pop(symbol, None)
-    state["margin_type_set"].discard(symbol)
-    state["roe_pause_symbols"].discard(symbol)
-    state["triggered_symbols"].discard(symbol)
-
-
-# ===== 黑K偵測 =====
-
-async def check_black_k(client, cfg, symbol):
-    """偵測黑K，取3根最高點作為空單點位"""
-    klines = await client.get_klines(symbol, "1m", limit=10)
-    if not klines or len(klines) < 4:
-        return None
-
-    last_k = klines[-2]
-    k_open_time = last_k[0]
-    open_p = float(last_k[1])
-    close_p = float(last_k[4])
-    high_p = float(last_k[2])
-    volume = float(last_k[5])
-
-    if state["black_k_last_k_time"].get(symbol) == k_open_time:
-        return None
-    if close_p >= open_p:
-        return None
-
-    state["black_k_last_k_time"][symbol] = k_open_time
-
-    three_ks = klines[-4:-1]
-    highest = max(float(k[2]) for k in three_ks)
-
-    logger.info(f"🖤 黑K {symbol} 最高點={highest}")
-    write_log("BLACK_K", f"黑K目標={highest}", symbol=symbol,
-              detail={
-                  "open": open_p, "close": close_p, "high": high_p,
-                  "body_pct": round((open_p - close_p) / open_p * 100, 3),
-                  "upper_shadow_pct": round((high_p - open_p) / open_p * 100, 3) if high_p > open_p else 0,
-                  "volume": volume,
-                  "highest": highest
-              })
-    return highest
-
-
-# ===== ROE 檢查 =====
-
-async def check_symbol_roe(client, cfg, symbol):
-    """
-    檢查單幣種浮動損益，觸發保護機制
-
-    修正：ROE 用 DB 持倉的 margin 計算，不依賴 Binance initialMargin
-    （全倉模式下 initialMargin 會因浮虧改變，語義不穩定）
-    """
-    current_price = get_cached_price(symbol)
-    if not current_price:
-        return
-
-    db_positions = get_open_positions(symbol)
-    if not db_positions:
-        return
-
-    total_qty = sum(p["quantity"] for p in db_positions)
-    total_margin = sum(p["margin"] for p in db_positions)
-    avg_entry = sum(p["entry_price"] * p["quantity"] for p in db_positions) / total_qty
-
-    if total_margin <= 0:
-        return
-
-    # SHORT：入場價 - 現價 = 浮動盈虧/合約數量
-    unrealized_pnl = (avg_entry - current_price) * total_qty
-    roe_pct = (unrealized_pnl / total_margin) * 100
-    capital_return_pct = roe_pct / cfg["leverage"]
-
-    if capital_return_pct <= cfg["pause_open_capital_pct"]:
-        if symbol not in state["roe_pause_symbols"]:
-            state["roe_pause_symbols"].add(symbol)
-            write_log("ROE_PAUSE", f"本金虧損 {capital_return_pct:.1f}%，暫停開倉", symbol=symbol,
-                      detail={"avg_entry": avg_entry, "current_price": current_price,
-                              "unrealized_pnl": round(unrealized_pnl, 4),
-                              "roe_pct": round(roe_pct, 2),
-                              "capital_return_pct": round(capital_return_pct, 2)})
-
-    if capital_return_pct <= cfg["force_close_capital_pct"]:
-        write_log("ROE_FORCE", f"本金虧損 {capital_return_pct:.1f}%，強制平倉", symbol=symbol,
-                  detail={"avg_entry": avg_entry, "current_price": current_price,
-                          "unrealized_pnl": round(unrealized_pnl, 4),
-                          "capital_return_pct": round(capital_return_pct, 2)})
-        await close_symbol(client, cfg, symbol, reason="FORCE_CLOSE")
-        return
-
-    if capital_return_pct > cfg["pause_open_capital_pct"] and symbol in state["roe_pause_symbols"]:
-        state["roe_pause_symbols"].discard(symbol)
-        write_log("ROE_RESUME", f"ROE回升至 {capital_return_pct:.1f}%，恢復開倉", symbol=symbol)
-
-
-# ===== 網格監控（核心邏輯）=====
-
-async def monitor_grids(client, cfg, symbol):
-    """
-    網格監控邏輯：
-    1. 取當前價格（從快取）
-    2. 找DB_ONLY網格中，已被價格跌破的（price > current_price）→ 掛出等反彈
-    3. 現價上方的DB_ONLY網格 → 不掛，等黑K決定
-
-    修正：精度計算改用快取，不再每個網格都打 exchangeInfo API
-    """
-    current_price = get_cached_price(symbol)
-    if not current_price:
-        return
-
-    db_grids = get_grids(symbol, status='DB_ONLY')
-    if not db_grids:
-        return
-
-    open_positions = get_open_positions(symbol)
-    max_orders = cfg.get("max_orders_per_symbol", 20)
-
-    if len(open_positions) >= max_orders:
-        return
-
-    # 一次取得精度（快取），不在迴圈內重複打API
-    filters = await get_symbol_filters_cached(client, symbol)
-    if not filters:
-        return
-
-    balance = await get_balance_cached(client)
-    if not balance:
-        return
-
-    total = balance["total"]
-    base_notional = get_notional(cfg, total)
-    existing_count = len(open_positions)
-    scale_after = cfg.get("scale_after_order", 10)
-    scale_mult = cfg.get("scale_multiplier", 1.5)
-    notional = base_notional * scale_mult if existing_count >= scale_after else base_notional
-
-    for grid in db_grids:
-        grid_price = grid["price"]
-
-        if current_price >= grid_price:
-            continue
-
-        if len(open_positions) >= max_orders:
-            break
-
-        # 精度對齊（不打API）
-        qty = notional / grid_price
-        qty = align_quantity(qty, filters["step_size"])
-        aligned_price = align_price(grid_price, filters["tick_size"])
-
-        if not qty or qty <= 0:
-            continue
-
-        result = await client.place_limit_order(symbol, "SELL", qty, aligned_price)
-
-        if result and "orderId" in result:
-            order_id = str(result["orderId"])
-            mark_grid_placed(symbol, grid_price, order_id)
-            logger.info(f"📌 網格掛出 {symbol} @ {aligned_price}")
-            write_log("GRID_PLACE", f"網格掛出 @ {aligned_price}", symbol=symbol,
-                      detail={"grid_price": aligned_price, "order_id": order_id,
-                              "current_price": current_price, "qty": qty})
-        else:
-            write_log("ERROR", f"網格掛單失敗 @ {aligned_price}: {result.get('msg','') if result else 'no response'}",
-                      symbol=symbol)
-
-
-# ===== Reset 功能 =====
+# ===== Reset =====
 
 async def reset_system(client, cfg):
-    """
-    Reset：
-    1. 取消交易所所有掛單
-    2. 掃描實際持倉，重新掛止盈止損
-    3. 清除所有state記憶
-    """
-    logger.info("🔄 系統Reset開始")
+    """取消所有掛單，重新掛止盈止損，清除state"""
+    logger.info("🔄 Reset開始")
 
-    open_syms = get_open_symbols()
+    all_positions = await get_all_binance_positions(client)
 
-    # 1. 取消所有掛單
-    for symbol in open_syms:
+    for symbol in list(all_positions.keys()):
         try:
             await client.cancel_all_orders(symbol)
         except Exception as e:
             logger.error(f"取消掛單失敗 {symbol}: {e}")
 
-    # 2. 清除所有state
-    state["tp_order_ids"].clear()
-    state["sl_order_ids"].clear()
+    # 清除state
+    state["tp_sl_orders"].clear()
     state["black_k_targets"].clear()
     state["black_k_last_k_time"].clear()
+    state["hidden_grids"].clear()
+    state["known_fills"].clear()
     state["triggered_symbols"].clear()
-    state["roe_pause_symbols"].clear()
-    state["margin_type_set"].clear()
+    state["symbol_setup_done"].clear()
     state["symbol_filters_cache"].clear()
     state["balance_cache"] = None
-    state["balance_cache_time"] = 0
+    state["margin_pause"] = False
 
-    # 3. 重新掛止盈止損
-    for symbol in open_syms:
-        positions = await client.get_positions(symbol)
-        if positions:
-            logger.info(f"重新掛止盈止損 {symbol}")
-            await place_tp_sl_orders(client, cfg, symbol)
+    # 重新掛止盈止損
+    for symbol in all_positions.keys():
+        await place_tp_sl(client, cfg, symbol)
 
-    write_log("RESET", f"系統Reset完成，有持倉幣種: {open_syms}")
-    logger.info("✅ 系統Reset完成")
-    return {"status": "ok", "open_symbols": open_syms}
+    write_log("RESET", f"Reset完成，持倉幣種: {list(all_positions.keys())}")
+    return {"status": "ok", "open_symbols": list(all_positions.keys())}
 
 
-# ===== 暫停處理 =====
+# ===== 暫停 =====
 
 async def handle_pause(client, cfg):
-    """
-    暫停：取消所有開倉掛單（網格單），保留止盈止損單
-    """
-    open_syms = get_open_symbols()
-    for symbol in open_syms:
+    """取消所有開倉網格掛單，保留止盈止損"""
+    all_positions = await get_all_binance_positions(client)
+
+    for symbol in all_positions.keys():
         try:
             open_orders = await client.get_open_orders(symbol)
-            protected_ids = set()
-            for ids in [state["tp_order_ids"].get(symbol, {}),
-                        state["sl_order_ids"].get(symbol, {})]:
-                protected_ids.update(ids.values())
+            protected = set(state["tp_sl_orders"].get(symbol, {}).values())
 
             for order in open_orders:
-                order_id = str(order["orderId"])
-                if order_id not in protected_ids:
-                    await client.cancel_order(symbol, order_id)
-                    logger.info(f"暫停：取消開倉掛單 {symbol} #{order_id}")
+                oid = str(order["orderId"])
+                if oid not in protected:
+                    await client.cancel_order(symbol, oid)
 
-            clear_db_only_grids(symbol)
-
+            state["hidden_grids"].pop(symbol, None)
         except Exception as e:
             logger.error(f"暫停處理失敗 {symbol}: {e}")
 
@@ -773,86 +811,84 @@ async def trading_loop():
 
             client = get_client(cfg)
 
-            # 批次取價（每輪一次）
+            # 批次取價
             await refresh_price_cache(client)
 
-            # 1. 更新候選池
-            open_syms = get_open_symbols()
+            # 取得幣安實際持倉
+            all_positions = await get_all_binance_positions(client)
+            open_syms = set(all_positions.keys())
+
+            # 1. 監控現有持倉（新成交、隱形網格、ROE）
+            for symbol in list(open_syms):
+                try:
+                    await monitor_symbol(client, cfg, symbol)
+                except Exception as e:
+                    logger.error(f"監控失敗 {symbol}: {e}")
+
+            # 2. 更新候選池
             pool_refresh_sec = cfg.get("candidate_pool_refresh_min", 3) * 60
             time_since_scan = time.time() - state["last_pool_scan"]
-            has_vacancy = len(open_syms) < cfg["max_symbols"]
-            need_refresh = (has_vacancy or time_since_scan >= pool_refresh_sec) and not state["paused"]
+            need_refresh = time_since_scan >= pool_refresh_sec and not state["paused"]
 
             if need_refresh:
                 scanner_data = state.get("scanner_latest_result", [])
                 candidates = await scan_candidates(cfg, scanner_data=scanner_data)
                 state["candidate_pool"] = candidates
-                state["last_scan_result"] = candidates
                 state["last_pool_scan"] = time.time()
-                write_log("SCAN", f"候選池更新 {len(candidates)} 個",
-                          detail={"trigger": "vacancy" if has_vacancy else "timer"})
 
-            # 2. 監控現有持倉
-            for symbol in list(open_syms):
-                await check_symbol_roe(client, cfg, symbol)
-                if symbol not in state["roe_pause_symbols"]:
-                    await monitor_grids(client, cfg, symbol)
+            # 3. 候選池開倉監控
+            if not state["paused"] and not state["margin_pause"]:
+                for candidate in state["candidate_pool"]:
+                    sym = candidate["symbol"]
+                    current_price = get_cached_price(sym)
+                    if not current_price:
+                        continue
 
-            # 3. 候選池觸價監控
-            open_syms = get_open_symbols()
-            for candidate in state["candidate_pool"]:
-                sym = candidate["symbol"]
+                    upper = candidate["upper_15m"]
 
-                if sym not in open_syms and len(open_syms) >= cfg["max_symbols"]:
-                    break
-                if state["paused"] or state["margin_pause"]:
-                    break
+                    # 持倉數檢查（以幣安為準）
+                    already_has_position = sym in open_syms
+                    at_max = not already_has_position and len(open_syms) >= cfg["max_symbols"]
 
-                current_price = get_cached_price(sym)
-                if not current_price:
-                    continue
+                    # 觸碰上軌開倉（往下方向）
+                    if current_price >= upper * 0.9995:
+                        if sym not in state["triggered_symbols"]:
+                            write_log("TRIGGER", f"觸碰上軌 price={current_price} upper={upper}",
+                                      symbol=sym)
+                            state["triggered_symbols"].add(sym)
+                            if not at_max:
+                                await try_open_position(client, cfg, sym, upper, "UPPER")
+                            else:
+                                write_log("BLOCKED", "持倉已滿，觸碰上軌但被擋", symbol=sym)
 
-                upper = candidate["upper_15m"]
-
-                # 往下：首次觸碰上軌開第一單
-                if current_price >= upper * 0.9995:
-                    already = sym in open_syms or sym in state["triggered_symbols"]
-                    if not already:
-                        logger.info(f"🎯 觸價 {sym} @ {current_price} 上軌={upper}")
-                        write_log("TRIGGER", f"觸碰上軌，開第一單", symbol=sym,
-                                  detail={"price": current_price, "upper_15m": upper})
-                        state["triggered_symbols"].add(sym)
-                        success = await try_open_position(client, cfg, sym, upper, grid_level=0)
-                        if not success:
+                    # 離開上軌解鎖
+                    if current_price < upper * 0.998 and sym in state["triggered_symbols"]:
+                        if sym not in open_syms:
                             state["triggered_symbols"].discard(sym)
-                        else:
-                            open_syms = get_open_symbols()
 
-                # 價格離開上軌且無持倉，解鎖觸發
-                if (current_price < upper * 0.998
-                        and sym in state["triggered_symbols"]
-                        and sym not in get_open_symbols()):
-                    state["triggered_symbols"].discard(sym)
+                    # 突破上軌：黑K偵測
+                    if current_price > upper:
+                        if sym not in state["black_k_targets"]:
+                            target = await check_black_k(client, sym)
+                            if target:
+                                state["black_k_targets"][sym] = target
+                                write_log("BLACK_K_TARGET", f"黑K目標設定={target}", symbol=sym)
 
-                # 往上：策略A黑K偵測（已有目標時不重複）
-                if current_price > upper and sym not in state["black_k_targets"]:
-                    target = await check_black_k(client, cfg, sym)
-                    if target:
-                        state["black_k_targets"][sym] = target
-
-                # 黑K目標觸價
-                if sym in state["black_k_targets"]:
-                    target_price = state["black_k_targets"][sym]
-                    if current_price >= target_price * 0.9995:
-                        logger.info(f"🖤 黑K觸價 {sym} @ {current_price}")
-                        success = await try_open_position(client, cfg, sym, target_price,
-                                                          grid_level=len(get_open_positions(sym)))
-                        if success:
-                            state["black_k_targets"].pop(sym, None)
-                            state["black_k_last_k_time"].pop(sym, None)
+                    # 黑K目標觸價
+                    if sym in state["black_k_targets"]:
+                        target_price = state["black_k_targets"][sym]
+                        if current_price >= target_price * 0.9995:
+                            logger.info(f"🖤 黑K觸價 {sym} @ {current_price}")
+                            if not at_max:
+                                success = await try_open_position(client, cfg, sym, target_price, "BLACK_K")
+                                if success:
+                                    state["black_k_targets"].pop(sym, None)
+                                    state["black_k_last_k_time"].pop(sym, None)
+                            else:
+                                write_log("BLOCKED", "持倉已滿，黑K觸價但被擋", symbol=sym)
 
         except Exception as e:
-            logger.error(f"交易循環錯誤: {e}", exc_info=True)
+            logger.error(f"主循環錯誤: {e}", exc_info=True)
 
         await asyncio.sleep(10)
 

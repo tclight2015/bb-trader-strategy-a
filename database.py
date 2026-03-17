@@ -1,8 +1,21 @@
+"""
+資料庫模組
+
+設計原則：DB只記已完成的歷史，不維護即時持倉狀態（即時狀態以幣安為準）
+
+表結構：
+- trade_history：每筆交易平倉後的彙總紀錄
+- trade_analytics：完整交易資料，為未來學習系統設計
+- daily_summary：每日績效（從trade_history計算）
+- capital_log：出入金紀錄
+- system_log：系統事件日誌
+"""
+
 import sqlite3
 import json
 from datetime import datetime, timezone, timedelta
-TZ_TAIPEI = timezone(timedelta(hours=8))
 
+TZ_TAIPEI = timezone(timedelta(hours=8))
 DB_FILE = "trading.db"
 
 
@@ -16,30 +29,7 @@ def init_db():
     conn = get_conn()
     c = conn.cursor()
 
-    # 持倉紀錄（每個幣種的所有開倉）
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS positions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            order_id TEXT,
-            side TEXT DEFAULT 'SHORT',
-            entry_price REAL,
-            quantity REAL,
-            notional REAL,
-            margin REAL,
-            leverage INTEGER,
-            grid_level INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'OPEN',  -- OPEN / CLOSED / FORCE_CLOSED
-            open_time TEXT,
-            close_time TEXT,
-            close_price REAL,
-            pnl REAL,
-            roe_pct REAL,
-            close_reason TEXT  -- TP / FORCE_CLOSE / MANUAL
-        )
-    """)
-
-    # 歷史交易摘要（每個幣種平倉後的彙總）
+    # 歷史交易彙總（每次平倉寫一筆）
     c.execute("""
         CREATE TABLE IF NOT EXISTS trade_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,44 +39,38 @@ def init_db():
             avg_entry_price REAL,
             close_price REAL,
             total_quantity REAL,
-            total_notional REAL,
             total_margin REAL,
             total_pnl REAL,
             roe_pct REAL,
-            position_count INTEGER,
             close_reason TEXT
         )
     """)
 
-    # 網格狀態（每個幣種當前的網格掛單）
+    # 完整交易分析資料（為學習系統設計）
     c.execute("""
-        CREATE TABLE IF NOT EXISTS grids (
+        CREATE TABLE IF NOT EXISTS trade_analytics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            price REAL NOT NULL,
-            direction TEXT,  -- UP / DOWN
-            order_id TEXT,
-            status TEXT DEFAULT 'DB_ONLY',  -- DB_ONLY / PLACED / FILLED / CANCELLED
-            created_time TEXT
-        )
-    """)
-    # 相容舊資料：若 status 欄沒有 DB_ONLY 值，補上
-    try:
-        c.execute("ALTER TABLE grids ADD COLUMN placed INTEGER DEFAULT 0")
-    except Exception:
-        pass
-
-    # 日績效摘要
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS daily_summary (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT UNIQUE,
-            total_trades INTEGER DEFAULT 0,
-            winning_trades INTEGER DEFAULT 0,
-            total_pnl REAL DEFAULT 0,
-            win_rate REAL DEFAULT 0,
-            starting_balance REAL,
-            ending_balance REAL
+            symbol TEXT,
+            close_time TEXT,
+            avg_entry_price REAL,
+            close_price REAL,
+            total_qty REAL,
+            total_margin REAL,
+            total_pnl REAL,
+            roe_pct REAL,
+            close_reason TEXT,
+            -- 開倉時市場狀態快照
+            upper_15m REAL,
+            dist_15m_pct REAL,
+            dist_1h_pct REAL,
+            band_width_pct REAL,
+            volume_usdt REAL,
+            prev_high_score REAL,
+            -- 出場品質追蹤（未來填入）
+            price_1h_after REAL,
+            price_4h_after REAL,
+            -- 完整資料JSON備份
+            extra_data TEXT
         )
     """)
 
@@ -95,14 +79,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS capital_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             time TEXT,
-            type TEXT,   -- DEPOSIT / WITHDRAW
+            type TEXT,
             amount REAL,
             note TEXT,
             balance_after REAL
         )
     """)
 
-    # 系統日誌（詳細交易事件，供分析優化用）
+    # 系統日誌
     c.execute("""
         CREATE TABLE IF NOT EXISTS system_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,157 +102,52 @@ def init_db():
     conn.close()
 
 
-# === 持倉操作 ===
+# ===== 交易歷史 =====
 
-def add_position(symbol, order_id, entry_price, quantity, notional, margin, leverage, grid_level=0):
+def record_trade_close(symbol, avg_entry, close_price, total_qty,
+                       total_margin, total_pnl, roe_pct, close_reason,
+                       open_time=None):
+    """平倉後記錄歷史"""
     conn = get_conn()
-    conn.execute("""
-        INSERT INTO positions (symbol, order_id, side, entry_price, quantity, notional, margin, leverage, grid_level, open_time)
-        VALUES (?, ?, 'SHORT', ?, ?, ?, ?, ?, ?, ?)
-    """, (symbol, order_id, entry_price, quantity, notional, margin, leverage, grid_level,
-          datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")))
-    conn.commit()
-    conn.close()
-
-
-def get_open_positions(symbol=None):
-    conn = get_conn()
-    if symbol:
-        rows = conn.execute(
-            "SELECT * FROM positions WHERE status='OPEN' AND symbol=? ORDER BY open_time",
-            (symbol,)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM positions WHERE status='OPEN' ORDER BY symbol, open_time"
-        ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def get_open_symbols():
-    """取得目前有持倉的幣種列表"""
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT DISTINCT symbol FROM positions WHERE status='OPEN'"
-    ).fetchall()
-    conn.close()
-    return [r["symbol"] for r in rows]
-
-
-def close_positions(symbol, close_price, close_reason="TP"):
-    """平倉：關閉該幣種所有持倉，計算PnL，寫入歷史"""
-    conn = get_conn()
-    positions = conn.execute(
-        "SELECT * FROM positions WHERE status='OPEN' AND symbol=?", (symbol,)
-    ).fetchall()
-
-    if not positions:
-        conn.close()
-        return None
-
-    total_qty = sum(p["quantity"] for p in positions)
-    total_notional = sum(p["notional"] for p in positions)
-    total_margin = sum(p["margin"] for p in positions)
-    avg_entry = sum(p["entry_price"] * p["quantity"] for p in positions) / total_qty
-
-    # PnL for SHORT: (entry - close) * qty
-    total_pnl = (avg_entry - close_price) * total_qty
-    roe_pct = (total_pnl / total_margin) * 100 if total_margin > 0 else 0
-
-    close_time = datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")
-
-    # Update positions
-    conn.execute("""
-        UPDATE positions SET status=?, close_time=?, close_price=?, pnl=?, roe_pct=?, close_reason=?
-        WHERE status='OPEN' AND symbol=?
-    """, (close_reason if close_reason == "FORCE_CLOSED" else "CLOSED",
-          close_time, close_price, total_pnl, roe_pct, close_reason, symbol))
-
-    # Write trade history
+    now = datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("""
         INSERT INTO trade_history
-        (symbol, open_time, close_time, avg_entry_price, close_price, total_quantity,
-         total_notional, total_margin, total_pnl, roe_pct, position_count, close_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (symbol, positions[0]["open_time"], close_time, avg_entry, close_price,
-          total_qty, total_notional, total_margin, total_pnl, roe_pct,
-          len(positions), close_reason))
-
-    conn.commit()
-    conn.close()
-
-    return {
-        "symbol": symbol,
-        "avg_entry": avg_entry,
-        "close_price": close_price,
-        "total_pnl": total_pnl,
-        "roe_pct": roe_pct,
-        "position_count": len(positions)
-    }
-
-
-# === 網格操作 ===
-
-def save_grids(symbol, grid_prices, direction="DOWN"):
-    """儲存網格到DB（DB_ONLY狀態，尚未掛出）"""
-    conn = get_conn()
-    # 只清除 DB_ONLY 的網格（已掛出的不動，讓它隨緣成交）
-    conn.execute("DELETE FROM grids WHERE symbol=? AND status='DB_ONLY'", (symbol,))
-    for price in grid_prices:
-        conn.execute("""
-            INSERT INTO grids (symbol, price, direction, status, created_time)
-            VALUES (?, ?, ?, 'DB_ONLY', ?)
-        """, (symbol, price, direction, datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")))
+        (symbol, open_time, close_time, avg_entry_price, close_price,
+         total_quantity, total_margin, total_pnl, roe_pct, close_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (symbol, open_time or now, now,
+          avg_entry, close_price, total_qty,
+          total_margin, total_pnl, roe_pct, close_reason))
     conn.commit()
     conn.close()
 
 
-def get_grids(symbol, status=None):
-    """取得網格列表，status=None取全部，status='DB_ONLY'只取未掛出的"""
+def add_trade_analytics(symbol, avg_entry, close_price, total_qty,
+                        total_margin, total_pnl, roe_pct, close_reason,
+                        market_snapshot=None):
+    """記錄完整交易分析資料（為學習系統）"""
     conn = get_conn()
-    if status:
-        rows = conn.execute(
-            "SELECT * FROM grids WHERE symbol=? AND status=? ORDER BY price DESC",
-            (symbol, status)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM grids WHERE symbol=? AND status IN ('DB_ONLY','PLACED') ORDER BY price DESC",
-            (symbol,)
-        ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def mark_grid_placed(symbol, price, order_id):
-    """標記網格已掛出"""
-    conn = get_conn()
+    snap = market_snapshot or {}
+    now = datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("""
-        UPDATE grids SET status='PLACED', order_id=?
-        WHERE symbol=? AND price=? AND status='DB_ONLY'
-    """, (order_id, symbol, price))
+        INSERT INTO trade_analytics
+        (symbol, close_time, avg_entry_price, close_price, total_qty,
+         total_margin, total_pnl, roe_pct, close_reason,
+         upper_15m, dist_15m_pct, dist_1h_pct, band_width_pct,
+         volume_usdt, prev_high_score, extra_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (symbol, now, avg_entry, close_price, total_qty,
+          total_margin, total_pnl, roe_pct, close_reason,
+          snap.get("upper_15m", 0),
+          snap.get("dist_15m", 0),
+          snap.get("dist_1h", 0),
+          snap.get("band_width_pct", 0),
+          snap.get("volume_usdt", 0),
+          snap.get("prev_high_score", 0),
+          json.dumps(snap, ensure_ascii=False)))
     conn.commit()
     conn.close()
 
-
-def clear_grids(symbol):
-    """清除所有網格（平倉時用）"""
-    conn = get_conn()
-    conn.execute("DELETE FROM grids WHERE symbol=?", (symbol,))
-    conn.commit()
-    conn.close()
-
-
-def clear_db_only_grids(symbol):
-    """只清除 DB_ONLY 的網格（已掛出的保留）"""
-    conn = get_conn()
-    conn.execute("DELETE FROM grids WHERE symbol=? AND status='DB_ONLY'", (symbol,))
-    conn.commit()
-    conn.close()
-
-
-# === 歷史查詢 ===
 
 def get_trade_history(limit=100):
     conn = get_conn()
@@ -280,7 +159,6 @@ def get_trade_history(limit=100):
 
 
 def get_daily_pnl():
-    """每日損益統計"""
     conn = get_conn()
     rows = conn.execute("""
         SELECT
@@ -298,7 +176,6 @@ def get_daily_pnl():
 
 
 def get_cumulative_pnl():
-    """累積損益曲線資料"""
     conn = get_conn()
     rows = conn.execute("""
         SELECT close_time, total_pnl, symbol
@@ -314,12 +191,15 @@ def get_cumulative_pnl():
     return data
 
 
+# ===== 出入金 =====
+
 def add_capital_log(type_, amount, note, balance_after):
     conn = get_conn()
     conn.execute("""
         INSERT INTO capital_log (time, type, amount, note, balance_after)
         VALUES (?, ?, ?, ?, ?)
-    """, (datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S"), type_, amount, note, balance_after))
+    """, (datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S"),
+          type_, amount, note, balance_after))
     conn.commit()
     conn.close()
 
@@ -333,23 +213,22 @@ def get_capital_log():
     return [dict(r) for r in rows]
 
 
-# === 系統日誌 ===
+# ===== 系統日誌 =====
 
 def write_log(event_type, note, symbol=None, detail=None):
-    """寫入系統日誌"""
-    import json as _json
     conn = get_conn()
     conn.execute("""
         INSERT INTO system_log (time, event_type, symbol, detail, note)
         VALUES (?, ?, ?, ?, ?)
-    """, (datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S"), event_type, symbol,
-          _json.dumps(detail, ensure_ascii=False) if detail else None, note))
+    """, (datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d %H:%M:%S"),
+          event_type, symbol,
+          json.dumps(detail, ensure_ascii=False) if detail else None,
+          note))
     conn.commit()
     conn.close()
 
 
 def get_logs(event_type=None, symbol=None, limit=200):
-    """查詢日誌"""
     conn = get_conn()
     conditions = []
     params = []
@@ -369,7 +248,6 @@ def get_logs(event_type=None, symbol=None, limit=200):
 
 
 def get_log_summary():
-    """日誌統計摘要"""
     conn = get_conn()
     rows = conn.execute("""
         SELECT event_type, COUNT(*) as count
@@ -379,3 +257,15 @@ def get_log_summary():
     """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def export_logs_json(limit=200):
+    """匯出最近N筆日誌為JSON字串，供下載分析用"""
+    logs = get_logs(limit=limit)
+    for log in logs:
+        if log.get("detail") and isinstance(log["detail"], str):
+            try:
+                log["detail"] = json.loads(log["detail"])
+            except Exception:
+                pass
+    return json.dumps(logs, ensure_ascii=False, indent=2)

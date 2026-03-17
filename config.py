@@ -15,51 +15,39 @@ DEFAULT_CONFIG = {
     # notional = 帳戶餘額 * capital_per_order_pct% * leverage
 
     # === 網格設定 ===
-    "grid_spacing_pct": 0.15,          # 網格間距%
-    "grid_down_count": 4,              # 往下網格數量
+    "grid_spacing_pct": 0.15,          # 網格間距%（隱形網格間距）
 
     # === 持倉管理 ===
-    "max_symbols": 3,                   # 最多持倉幣種數
+    "max_symbols": 3,                   # 最多同時持倉幣種數
     "candidate_pool_size": 10,          # 候選監控池大小
-    "pre_scan_size": 20,               # 先從15分K取前N個，再從中按1H取候選池
+    "pre_scan_size": 20,               # 從15分K取前N個再篩候選池
 
-    # === 止盈止損掛單（基於價格幅度%，與槓桿無關）===
-    # take_profit_price_pct: SHORT價格下跌X%止盈，1.0 = 跌1%止盈
-    # force_close_price_pct: SHORT價格上漲X%止損，3.0 = 漲3%止損
-    "take_profit_price_pct": 1.0,
-    "force_close_price_pct": 3.0,
-    "tp_limit_pct": 50,                # 止盈拆單：限價單佔%（剩餘為Stop-Market）
+    # === 止盈止損（基於價格幅度%，與槓桿無關）===
+    "take_profit_price_pct": 1.0,      # 止盈：SHORT價格下跌X%，1.0 = 跌1%止盈
+    "force_close_price_pct": 3.0,      # 止損：SHORT價格上漲X%，3.0 = 漲3%止損
+    "tp_limit_pct": 50,                # 止盈止損拆單：限價單佔%（剩餘為Stop-Market）
+
     # === 開倉保護（基於本金%）===
-    "take_profit_capital_pct": 30.0,   # 兼容舊key，新邏輯用 take_profit_price_pct
-    "pause_open_capital_pct": -60.0,   # 暫停開新倉：本金虧X%
-    "force_close_capital_pct": -90.0,  # 強制平倉（ROE觸發）：本金虧X%
+    "pause_open_capital_pct": -60.0,   # 暫停開新倉：單幣本金虧X%
+    "force_close_capital_pct": -90.0,  # 強制平倉：單幣本金虧X%
 
     # === 保證金水位保護 ===
-    "margin_usage_limit_pct": 75.0,    # 保證金使用率上限%
+    "margin_usage_limit_pct": 75.0,    # 全帳戶保證金使用率上限%
 
-    # === 篩選條件 ===
-    "min_volume_usdt": 5_000_000,      # 最低24H成交量（USDT）
-    "max_dist_to_upper_pct": 0.5,      # 距上軌最大距離%（15分K）
-    "max_dist_1h_upper_pct": 1.0,      # 距上軌最大距離%（1小時K）
-    "min_band_width_pct": 1.0,         # 最低帶寬%
-    "prev_high_lookback": 5,           # 前高保護：往前看N根K棒
+    # === 掃描篩選條件 ===
+    "min_volume_usdt": 5_000_000,      # 最低24H成交量（USDT），0=無限制
+    "max_dist_to_upper_pct": 0.5,      # 距15分K上軌最大距離%
+    "max_dist_1h_upper_pct": 1.0,      # 距1H上軌最大距離%
+    "min_band_width_pct": 1.0,         # 最低BB帶寬%
+    "prev_high_lookback": 5,           # 前高壓力：往前看N根K棒
 
     # === 異常偵測 ===
-    "volume_spike_multiplier": 3.0,
-    "volume_shrink_lookback": 10,
-    "volume_shrink_threshold": 0.7,
-    "single_candle_max_rise_pct": 1.0,
+    "volume_spike_multiplier": 3.0,    # 成交量異常倍數（超過均量N倍跳過）
+    "single_candle_max_rise_pct": 1.0, # 單K最大漲幅%（超過此值不開倉）
 
     # === 系統設定 ===
     "system_running": True,
-    "scan_interval_sec": 60,
-    "candidate_pool_refresh_min": 3,
-    "max_orders_per_symbol": 20,
-    "scale_after_order": 10,
-    "scale_multiplier": 1.5,
-
-    # === 出入金紀錄 ===
-    "capital_transactions": [],
+    "candidate_pool_refresh_min": 3,   # 候選池更新間隔（分鐘）
 }
 
 
@@ -69,6 +57,7 @@ def load_config():
             saved = json.load(f)
         cfg = DEFAULT_CONFIG.copy()
         cfg.update(saved)
+        # 環境變數優先
         env_key = os.environ.get("BINANCE_API_KEY", "")
         env_secret = os.environ.get("BINANCE_API_SECRET", "")
         env_testnet = os.environ.get("BINANCE_TESTNET", "")
@@ -83,22 +72,14 @@ def load_config():
 
 
 def save_config(cfg):
+    # 不存 api_key/secret 到檔案（從環境變數讀）
+    save_data = {k: v for k, v in cfg.items()
+                 if k not in ["api_key", "api_secret"]}
     with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        json.dump(save_data, f, indent=2, ensure_ascii=False)
 
 
 def get_notional(cfg, account_balance):
+    """計算每單名義價值"""
     margin_per_order = account_balance * (cfg["capital_per_order_pct"] / 100)
     return margin_per_order * cfg["leverage"]
-
-
-def get_tp_roe(cfg):
-    return cfg["take_profit_capital_pct"] * cfg["leverage"] / 100
-
-
-def get_pause_roe(cfg):
-    return cfg["pause_open_capital_pct"] * cfg["leverage"] / 100
-
-
-def get_force_close_roe(cfg):
-    return cfg["force_close_capital_pct"] * cfg["leverage"] / 100
