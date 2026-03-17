@@ -964,9 +964,6 @@ async function loadPositions() {
             <div class="orders-list">
               <div class="orders-list-title">持倉數量：${qty} ｜ 隱形網格：${hiddenGrids.length} 個</div>
               ${hiddenGrids.length > 0 ? `<div class="order-row" style="color:var(--text3)">隱形網格：${hiddenGrids.map(p => fmt(p)).join(' / ')}</div>` : ''}
-                  <span>${fmtTime(p.open_time)}</span>
-                </div>
-              `).join('')}
             </div>
           </div>
         </div>
