@@ -284,6 +284,7 @@ def api_account():
         "paused": state["paused"],
         "margin_pause": state["margin_pause"],
         "candidate_pool": state["candidate_pool"],
+        "max_symbols": cfg.get("max_symbols", 3),
     })
 
 

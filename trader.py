@@ -415,7 +415,7 @@ async def place_tp_sl(client, cfg, symbol):
 
     # 止盈限價單
     if limit_qty > 0:
-        r = await client.place_limit_order(symbol, "BUY", limit_qty, tp_price, reduce_only=False)
+        r = await client.place_limit_order(symbol, "BUY", limit_qty, tp_price, reduce_only=True)
         if "orderId" in r:
             new_orders["tp_limit"] = str(r["orderId"])
             logger.info(f"✅ 止盈限價 {symbol} @ {tp_price} (-{tp_pct}%)")
@@ -425,7 +425,7 @@ async def place_tp_sl(client, cfg, symbol):
 
     # 止盈Stop-Market單
     if stop_qty > 0:
-        r = await client.place_stop_market_order(symbol, "BUY", stop_qty, tp_price, reduce_only=False)
+        r = await client.place_stop_market_order(symbol, "BUY", stop_qty, tp_price, reduce_only=True)
         if "orderId" in r:
             new_orders["tp_stop"] = str(r["orderId"])
             logger.info(f"✅ 止盈Stop {symbol} @ {tp_price}")
@@ -435,7 +435,7 @@ async def place_tp_sl(client, cfg, symbol):
 
     # 止損限價單
     if limit_qty > 0:
-        r = await client.place_limit_order(symbol, "BUY", limit_qty, sl_price, reduce_only=False)
+        r = await client.place_limit_order(symbol, "BUY", limit_qty, sl_price, reduce_only=True)
         if "orderId" in r:
             new_orders["sl_limit"] = str(r["orderId"])
             logger.info(f"✅ 止損限價 {symbol} @ {sl_price} (+{sl_pct}%)")
@@ -445,7 +445,7 @@ async def place_tp_sl(client, cfg, symbol):
 
     # 止損Stop-Market單
     if stop_qty > 0:
-        r = await client.place_stop_market_order(symbol, "BUY", stop_qty, sl_price, reduce_only=False)
+        r = await client.place_stop_market_order(symbol, "BUY", stop_qty, sl_price, reduce_only=True)
         if "orderId" in r:
             new_orders["sl_stop"] = str(r["orderId"])
             logger.info(f"✅ 止損Stop {symbol} @ {sl_price}")
@@ -555,7 +555,7 @@ async def close_symbol(client, cfg, symbol, reason="TP"):
         total_qty = pos["qty"]
         avg_entry = pos["avg_entry"]
 
-        result = await client.place_market_order(symbol, "BUY", total_qty, reduce_only=False)
+        result = await client.place_market_order(symbol, "BUY", total_qty, reduce_only=True)
         logger.info(f"市價平倉 {symbol}: {result}")
 
         # 取實際成交均價
@@ -943,6 +943,9 @@ async def trading_loop():
                             target = await check_black_k(client, sym)
                             if target:
                                 state["black_k_targets"][sym] = target
+                                # 黑K確認後立刻以最高點建立隱形網格
+                                # 不等第一張成交，讓後續下跌直接吃到網格
+                                update_hidden_grids(sym, target, cfg)
 
                     # 黑K目標觸價
                     if sym in state["black_k_targets"]:

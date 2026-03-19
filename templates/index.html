@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>BB Grid Trader — 策略A</title>
+<title>BB Grid Trader — 策略A｜幣安版</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -513,7 +513,7 @@ select.filter-select {
 
 <!-- NAV -->
 <nav>
-  <div class="nav-brand">📈 BB Grid A</div>
+  <div class="nav-brand">📈 BB Grid A <span style="background:#f59e0b20;color:#b45309;border:1px solid #f59e0b60;border-radius:4px;font-size:10px;font-weight:700;padding:2px 6px;letter-spacing:0.03em;vertical-align:middle;margin-left:4px">幣安版</span></div>
   <div class="nav-tabs">
     <div class="nav-tab active" onclick="showPage('dashboard')">儀表板</div>
     <div class="nav-tab" onclick="showPage('scanner')">掃描器</div>
@@ -852,6 +852,8 @@ async function loadAccount() {
     const res = await fetch('/api/account');
     const data = await res.json();
     const b = data.balance;
+
+    document.getElementById('maxSymbols').textContent = data.max_symbols ?? 3;
 
     if (b) {
       document.getElementById('totalBalance').textContent = fmtUSDT(b.total);
@@ -1294,31 +1296,26 @@ const CONFIG_LABELS = {
   force_close_capital_pct: ['強制平倉（本金-%）', '單幣種本金虧損此%時強制市價全平（負數）'],
   margin_usage_limit_pct: ['保證金使用率上限 %', '超過此值停止開新倉'],
   grid_spacing_pct: ['網格間距 %', ''],
-  grid_down_count: ['下方網格數量', ''],
   max_symbols: ['最多持倉幣種數', ''],
   candidate_pool_size: ['候選監控池大小', ''],
+  pre_scan_size: ['預掃描取前N個', '從15分K篩選後再取前N個進候選池'],
   min_volume_usdt: ['最低24H成交量（USDT）', '避免滑價'],
   max_dist_to_upper_pct: ['15分K距上軌上限 %', ''],
   max_dist_1h_upper_pct: ['1小時K距上軌上限 %', ''],
   min_band_width_pct: ['最低帶寬 %', ''],
   prev_high_lookback: ['前高保護回看K棒數', ''],
   volume_spike_multiplier: ['成交量異常倍數', '超過均量N倍跳過'],
-  volume_shrink_lookback: ['量縮回看K棒數', '計算均量的K棒數量'],
-  volume_shrink_threshold: ['量縮門檻', '當前量 < 均量 × 此值視為量縮（優先進候選池）'],
   single_candle_max_rise_pct: ['單K最大漲幅 %', '超過此值不開倉'],
   candidate_pool_refresh_min: ['候選池更新間隔（分鐘）', '定時強制重新掃描，預設3分鐘'],
-  max_orders_per_symbol: ['單幣種最大開單數', '達到此數量後停止對該幣種開新倉'],
-  scale_after_order: ['加碼起始筆數', '超過此筆數後每單合約價值乘以加碼倍數'],
-  scale_multiplier: ['加碼倍數', '如1.5代表合約價值變為1.5倍'],
 };
 
 const CONFIG_SECTIONS = {
-  '開單設定': ['capital_per_order_pct', 'leverage', 'max_orders_per_symbol', 'scale_after_order', 'scale_multiplier'],
+  '開單設定': ['capital_per_order_pct', 'leverage'],
   '止盈止損': ['take_profit_price_pct', 'force_close_price_pct', 'tp_limit_pct', 'pause_open_capital_pct', 'force_close_capital_pct'],
   '保護機制': ['margin_usage_limit_pct'],
-  '網格設定': ['grid_spacing_pct', 'grid_down_count'],
+  '網格設定': ['grid_spacing_pct'],
   '持倉管理': ['max_symbols', 'candidate_pool_size', 'pre_scan_size', 'candidate_pool_refresh_min'],
-  '篩選條件': ['min_volume_usdt', 'max_dist_to_upper_pct', 'max_dist_1h_upper_pct', 'min_band_width_pct', 'prev_high_lookback', 'volume_spike_multiplier', 'single_candle_max_rise_pct', 'volume_shrink_lookback', 'volume_shrink_threshold'],
+  '篩選條件': ['min_volume_usdt', 'max_dist_to_upper_pct', 'max_dist_1h_upper_pct', 'min_band_width_pct', 'prev_high_lookback', 'volume_spike_multiplier', 'single_candle_max_rise_pct'],
 };
 
 function renderSettings() {
